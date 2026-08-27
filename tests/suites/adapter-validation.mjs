@@ -6,7 +6,7 @@
  */
 
 const MAX_TIMEOUT_MS = 300_000;
-const MAX_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_RESPONSE_BODY_BYTES = 256 * 1024 * 1024;
 
 export function adapterValidationTests({
   createNode,
@@ -63,7 +63,7 @@ export function adapterValidationTests({
         Number.POSITIVE_INFINITY,
         -1,
         1.5,
-        MAX_BODY_BYTES + 1,
+        MAX_RESPONSE_BODY_BYTES + 1,
       ];
 
       for (const value of timeoutValues) {
@@ -169,19 +169,27 @@ export function adapterValidationTests({
         });
       });
 
-      const res = await node.fetch(`httpi://${id}/validation`, {
-        headers: [["x-conformance", "ok"]],
-        requestTimeout: 30_000,
-        maxResponseBodyBytes: 1024,
-      });
+      for (
+        const maxResponseBodyBytes of [
+          16 * 1024 * 1024,
+          64 * 1024 * 1024,
+          MAX_RESPONSE_BODY_BYTES,
+        ]
+      ) {
+        const res = await node.fetch(`httpi://${id}/validation`, {
+          headers: [["x-conformance", "ok"]],
+          requestTimeout: 30_000,
+          maxResponseBodyBytes,
+        });
 
-      assertEqual(res.status, 200, "valid request should succeed");
-      assertEqual(await res.text(), "ok", "valid header should pass through");
-      assertEqual(
-        res.headers.get("x-conformance-response"),
-        "ok",
-        "valid response header should pass through",
-      );
+        assertEqual(res.status, 200, "valid request should succeed");
+        assertEqual(await res.text(), "ok", "valid header should pass through");
+        assertEqual(
+          res.headers.get("x-conformance-response"),
+          "ok",
+          "valid response header should pass through",
+        );
+      }
     } finally {
       await node.close();
       if (handle) await handle.finished.catch(() => {});

@@ -85,7 +85,7 @@ test("fetch numeric validation rejects invalid values instead of defaulting", as
   const { id } = await node.addr();
   const url = `httpi://${id}/validation`;
   const maxTimeoutMs = 300_000;
-  const maxBodyBytes = 16 * 1024 * 1024;
+  const maxResponseBodyBytes = 256 * 1024 * 1024;
 
   try {
     for (
@@ -110,7 +110,7 @@ test("fetch numeric validation rejects invalid values instead of defaulting", as
         Number.POSITIVE_INFINITY,
         -1,
         1.5,
-        maxBodyBytes + 1,
+        maxResponseBodyBytes + 1,
       ]
     ) {
       await assert.rejects(

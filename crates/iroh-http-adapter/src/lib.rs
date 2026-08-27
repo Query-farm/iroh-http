@@ -992,6 +992,47 @@ mod tests {
     }
 
     #[test]
+    fn coerce_fetch_options_accepts_response_limits_through_core_default() {
+        const CORE_DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 256 * 1024 * 1024;
+
+        for value in [
+            MAX_BODY_BYTES,
+            64 * 1024 * 1024,
+            CORE_DEFAULT_MAX_RESPONSE_BODY_BYTES,
+        ] {
+            let options = coerce_fetch_options(RawFetchOptions {
+                node_id: "aaaa".to_string(),
+                url: "httpi://peer/".to_string(),
+                method: "GET".to_string(),
+                direct_addrs: None,
+                headers: vec![],
+                timeout_ms: None,
+                max_response_body_bytes: Some(value as f64),
+            })
+            .expect("response limit through the core default should be accepted");
+
+            assert_eq!(options.max_response_body_bytes, Some(value));
+        }
+
+        let too_large = coerce_fetch_options(RawFetchOptions {
+            node_id: "aaaa".to_string(),
+            url: "httpi://peer/".to_string(),
+            method: "GET".to_string(),
+            direct_addrs: None,
+            headers: vec![],
+            timeout_ms: None,
+            max_response_body_bytes: Some((CORE_DEFAULT_MAX_RESPONSE_BODY_BYTES + 1) as f64),
+        });
+        assert!(matches!(
+            too_large,
+            Err(AdapterInputError::InvalidArgument {
+                field: "maxResponseBodyBytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn coerce_endpoint_options_validates_and_coerces() {
         let ok = coerce_endpoint_options(RawEndpointOptions {
             idle_timeout_ms: Some(1000.0),
