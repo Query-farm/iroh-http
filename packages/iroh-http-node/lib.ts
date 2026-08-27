@@ -54,6 +54,7 @@ import {
 
 import {
   classifyBindError,
+  classifyError,
   type DiscoveryInfo,
   IrohNode,
   type IrohNodeWithSecret,
@@ -182,7 +183,14 @@ class NodeAdapter extends IrohAdapter {
     try {
       const chunk = jsTryNextChunk(this.#eh, handle);
       return Promise.resolve(chunk ? new Uint8Array(chunk) : null);
-    } catch {
+    } catch (error) {
+      const classified = classifyError(error);
+      if (
+        classified.code !== "INTERNAL" ||
+        !classified.message.startsWith("try_next_chunk:")
+      ) {
+        throw classified;
+      }
       // Channel empty or lock contended — fall back to async.
       return jsNextChunk(this.#eh, handle);
     }

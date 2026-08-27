@@ -63,7 +63,6 @@ export function adapterValidationTests({
         Number.POSITIVE_INFINITY,
         -1,
         1.5,
-        MAX_RESPONSE_BODY_BYTES + 1,
       ];
 
       for (const value of timeoutValues) {
@@ -76,8 +75,37 @@ export function adapterValidationTests({
           await node.fetch(url, { maxResponseBodyBytes: value });
         }, `maxResponseBodyBytes=${String(value)}`);
       }
+
+      const overCapError = await assertThrows(async () => {
+        await node.fetch(url, {
+          maxResponseBodyBytes: MAX_RESPONSE_BODY_BYTES + 1,
+        });
+      }, "maxResponseBodyBytes over cap");
+      assertEqual(overCapError.code, "INVALID_ARGUMENT");
+      assertEqual(overCapError.name, "TypeError");
     } finally {
       await node.close();
+    }
+  });
+
+  test("adapter validation enforces the configured response body limit", async () => {
+    const node = await createNode({ disableNetworking: true });
+    let handle;
+    try {
+      const { id } = await node.addr();
+      handle = node.serve(() => new Response(new Uint8Array(1025)));
+
+      const error = await assertThrows(async () => {
+        const res = await node.fetch(`httpi://${id}/response-limit`, {
+          maxResponseBodyBytes: 1024,
+        });
+        await res.arrayBuffer();
+      }, "response body above configured cap");
+
+      assertEqual(error.code, "BODY_TOO_LARGE");
+    } finally {
+      await node.close();
+      if (handle) await handle.finished.catch(() => {});
     }
   });
 

@@ -35,7 +35,7 @@ use crate::{Body, ConnectionEvent, IrohEndpoint};
 use self::accept::{accept_loop, AcceptConfig};
 use self::options::{
     DEFAULT_CONCURRENCY, DEFAULT_DRAIN_TIMEOUT_MS, DEFAULT_MAX_CONNECTIONS_PER_PEER,
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_REQUEST_TIMEOUT_MS,
+    DEFAULT_REQUEST_TIMEOUT_MS,
 };
 
 // Re-exported from sub-modules so external paths
@@ -44,8 +44,9 @@ use self::options::{
 // unchanged after Slice C.7 split.
 pub(crate) use self::error_layer::HandleLayerErrorLayer;
 pub use self::handle::ServeHandle;
-pub use self::options::ServeOptions;
-pub(crate) use self::options::DEFAULT_MAX_RESPONSE_BODY_BYTES;
+pub use self::options::{
+    ServeOptions, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_RESPONSE_BODY_BYTES,
+};
 
 // ── Connection-event callback type ───────────────────────────────────────────
 
