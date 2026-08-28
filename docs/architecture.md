@@ -100,7 +100,7 @@ Core's `serve()` accepts an `on_request: Arc<dyn Fn(RequestPayload) + Send + Syn
 | Adapter | Mechanism | Model |
 |---------|-----------|-------|
 | Node | `ThreadsafeFunction` | Push — callback into JS event loop |
-| Deno | `mpsc` queue + `nextRequest()` | Pull — JS polls for requests |
+| Deno | bounded `mpsc` queue + `UnsafeCallback.threadSafe()` | Push notification — JS synchronously drains queued requests |
 | Tauri | Tauri `Channel` | Push — event emitted to frontend |
 
 **Behavioral guarantees of `on_request`:**
@@ -112,6 +112,14 @@ Core's `serve()` accepts an `on_request: Arc<dyn Fn(RequestPayload) + Send + Syn
 5. The callback must not panic. A panic in a Tokio task aborts only that task, but the request will hang until the timeout fires.
 
 Each adapter is responsible for surfacing errors from its callback mechanism. The core does not observe whether the callback succeeded.
+
+The Deno callback carries only an opaque serve-generation token. Request
+payloads remain owned by the bounded Rust queue and cross FFI only when
+`iroh_http_try_next_request` synchronously drains them on the JS thread. One
+module-lifetime `UnsafeCallback` keeps its function pointer valid for every
+endpoint and generation; it is unrefed so an idle server does not keep the
+process alive. Generation-keyed wake signals prevent a late notification from
+an old serve cycle from waking a restarted server.
 
 #### Request-delivery seam (`RequestTransport`)
 

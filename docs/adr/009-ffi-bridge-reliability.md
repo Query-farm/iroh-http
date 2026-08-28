@@ -66,7 +66,7 @@ different dispatch mechanism:
 | Adapter | Dispatch model | Respond path |
 |---------|----------------|--------------|
 | Node    | Callback via `ThreadsafeFunction` (push) | Synchronous NAPI call |
-| Deno    | mpsc queue + `nextRequest()` polling (pull) | Synchronous FFI symbol |
+| Deno    | Bounded mpsc queue + `UnsafeCallback` wake (push notification, synchronous drain) | Synchronous FFI symbol |
 | Tauri   | Tauri `Channel` event stream (push) | Typed invoke command |
 
 The Node adapter has proven reliable under high concurrency (32-stream bursts,
@@ -74,10 +74,12 @@ The Node adapter has proven reliable under high concurrency (32-stream bursts,
 conditions that produce `unknown handle` and `sendChunk failed` errors under
 the same load that Node handles cleanly.
 
-The root causes are architectural, not incidental: the Deno adapter's
-JSON-over-FFI + mpsc + polling design introduces latency between handle
-allocation in Rust and handle consumption in JS. That latency window is where
-every observed race occurs.
+The original root causes were architectural, not incidental: Deno's former
+JSON-over-FFI + async `nextRequest()` path introduced latency between handle
+allocation in Rust and handle consumption in JS. Issue #122 replaced that path
+with synchronous queue draining to avoid `spawn_blocking` starvation. Issue
+#397 retained that safe drain path but replaced its hot idle polling with a
+thread-safe callback that only notifies JS when work is ready.
 
 This exploration asks what architectural changes would bring Deno (and future
 adapters) to the same reliability level as Node and Tauri.
@@ -85,8 +87,7 @@ adapters) to the same reliability level as Node and Tauri.
 ## Questions
 
 1. Should the Deno adapter move from a polling (`nextRequest`) model to a
-   push model (e.g. a callback-based or channel-based mechanism), and what
-   would that look like given Deno's FFI constraints?
+   push-notified model while retaining synchronous queue draining?
 2. Should `on_request` in the core avoid spawning detached tokio tasks, and
    instead use a synchronous (non-spawn) sender so the adapter controls the
    async boundary?
@@ -121,11 +122,12 @@ libuv event loop. The NAPI `rawRespond` call is synchronous from the JS
 thread into the Rust slab. There is no intermediate queue, no polling latency,
 and no detached task.
 
-**Why Deno struggles:** The `on_request` callback spawns a detached tokio task
-to `try_send` into an mpsc channel. JS polls with `nextRequest()`. Between
-enqueue and dequeue, the Rust request task continues running — it may time out,
-the drain may fire, or `stopServe` may remove the registry entry. By the time
-JS calls `respond()`, the handle may already be gone.
+**Why Deno struggled before #122:** The `on_request` callback used an async
+`nextRequest()` dispatch through Deno's fixed `spawn_blocking` pool. Under
+concurrent self-fetches, request delivery competed with fetch work and could
+deadlock. Deno now uses a bounded queue, a request-ready callback carrying only
+an opaque generation token, and synchronous `try_next_request` draining on the
+JS thread. This preserves #122's deadlock avoidance without #397's idle poll.
 
 **Why Tauri is safe:** Tauri's `Channel` is owned by the command lifetime.
 Frontend and backend are separate processes, so there is no shared-runtime
@@ -133,8 +135,10 @@ deadlock risk. The channel is push-based with fail-closed semantics.
 
 ### Constraints
 
-- Deno's FFI (`dlopen`) does not support passing closures or callbacks from
-  Rust to JS — hence the polling model.
+- Deno's FFI supports `UnsafeCallback.threadSafe()` for calls originating on
+  foreign Tokio threads. The callback pointer must outlive every possible
+  native invocation and should be unrefed when it must not keep the process
+  alive.
 - Respond must be synchronous in Deno to avoid deadlock when client and server
   share the same single-threaded event loop (documented in #122).
 - The core's `on_request` callback must not block the QUIC accept loop.
@@ -150,6 +154,7 @@ deadlock risk. The channel is push-based with fail-closed semantics.
 | **C. InsertGuard ownership tokens** — Rust returns an owning guard with the handle; handle cannot be freed until guard is dropped | Explicit lifetime control | Adds RAII complexity across the FFI boundary; guards must be passed back |
 | **D. Move Deno to napi-rs** — use `napi-rs` for Deno (via `deno_napi` compat) instead of raw FFI | Same proven dispatch as Node | Adds napi dependency; Deno FFI is the official path and napi compat is not guaranteed |
 | **E. Tolerate stale handles** — make `respond`/`sendChunk`/`finishBody` return Ok for missing handles | No architectural change | Silently drops responses; masks real bugs |
+| **F. Callback wake + synchronous drain** — retain the bounded queue and `try_next_request`, but invoke a thread-safe Deno callback with an opaque generation token after enqueue | Preserves #122 behavior, avoids borrowed payload pointers, sleeps when idle | Requires callback pointer lifetime and restart routing to be explicit |
 
 ## Implications
 
@@ -164,13 +169,11 @@ deadlock risk. The channel is push-based with fail-closed semantics.
 
 ## Next steps
 
-- [ ] Prototype Option B (remove `tokio::spawn` in Deno dispatch, use direct
-      `try_send`) — this is the smallest change and may be sufficient.
-- [ ] If Option B is insufficient, prototype Option A (oneshot acknowledgment)
-      on a branch and benchmark the per-request overhead.
-- [ ] Run the regression test from #122 (32-stream burst × 5 iterations) on
-      each prototype to confirm zero stale-handle errors.
+- [x] Keep direct bounded `try_send` delivery and synchronous queue draining.
+- [x] Add Option F's callback wake without passing request payload pointers.
+- [x] Run the regression test from #122 (32-stream burst × 5 iterations) to
+      confirm zero stale-handle errors.
 - [ ] Audit whether any other adapter has a similar detached-task pattern that
       could surface under future load.
-- [ ] Document the chosen dispatch contract in [architecture.md](../architecture.md)
+- [x] Document the chosen dispatch contract in [architecture.md](../architecture.md)
       so future adapters (e.g. Python) follow the same pattern.
