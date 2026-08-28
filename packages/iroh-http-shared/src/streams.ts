@@ -6,6 +6,7 @@
  */
 
 import type { IrohAdapter } from "./IrohAdapter.js";
+import { classifyError } from "./errors.js";
 
 /**
  * Wrap a `BodyReader` handle in a web-standard `ReadableStream<Uint8Array>`.
@@ -25,12 +26,17 @@ export function makeReadable(
 ): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const chunk = await adapter.nextChunk(handle);
-      if (chunk === null) {
-        controller.close();
+      try {
+        const chunk = await adapter.nextChunk(handle);
+        if (chunk === null) {
+          controller.close();
+          onClose?.();
+        } else {
+          controller.enqueue(chunk);
+        }
+      } catch (error) {
         onClose?.();
-      } else {
-        controller.enqueue(chunk);
+        throw classifyError(error);
       }
     },
     cancel() {

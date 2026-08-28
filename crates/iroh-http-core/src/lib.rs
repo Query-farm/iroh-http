@@ -36,7 +36,10 @@ pub mod registry {
 // ── Pure-Rust HTTP API surface (`mod http`) ───────────────────────────────────
 pub use http::body::{Body, BoxError};
 pub use http::client::{fetch_request, FetchError};
-pub use http::server::{serve, serve_with_events, RemoteNodeId, ServeHandle, ServeOptions};
+pub use http::server::{
+    serve, serve_with_events, RemoteNodeId, ServeHandle, ServeOptions,
+    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_RESPONSE_BODY_BYTES,
+};
 
 // ── FFI bridge surface (`mod ffi`) ────────────────────────────────
 pub use ffi::dispatcher::{ffi_serve, ffi_serve_with_callback, respond};

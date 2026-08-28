@@ -7,6 +7,7 @@ import { installForegroundHealthCheck } from "./lifecycle.js";
 import {
   bigintToSafeNumber,
   classifyBindError,
+  classifyError,
   encodeBase64,
   IrohNode,
   type IrohNodeWithSecret,
@@ -93,15 +94,23 @@ class TauriAdapter extends IrohAdapter {
         const v = new Uint8Array(buf);
         return v.length > 0 && v[0] !== 0 ? v.subarray(1) : null;
       },
-      // Channel empty or lock contended — fall back to async.
-      () =>
-        invoke<ArrayBuffer>(`${PLUGIN}|next_chunk`, {
+      (error) => {
+        const classified = classifyError(error);
+        if (
+          classified.code !== "INTERNAL" ||
+          !classified.message.startsWith("try_next_chunk:")
+        ) {
+          throw classified;
+        }
+        // Channel empty or lock contended — fall back to async.
+        return invoke<ArrayBuffer>(`${PLUGIN}|next_chunk`, {
           endpointHandle: this.#epHandle,
           handle: safeHandle,
         }).then((buf) => {
           const v = new Uint8Array(buf);
           return v.length > 0 && v[0] !== 0 ? v.subarray(1) : null;
-        }),
+        });
+      },
     );
   }
 

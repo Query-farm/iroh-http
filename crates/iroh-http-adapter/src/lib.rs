@@ -10,6 +10,7 @@
 
 use iroh_http_core::{
     respond, CoreError, ErrorCode, HandleStore, RequestPayload, ResponseHeadEntry,
+    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_RESPONSE_BODY_BYTES,
 };
 
 /// Maximum number of header rows accepted at an adapter boundary.
@@ -20,8 +21,10 @@ pub const MAX_HEADER_NAME_LEN: usize = 256;
 pub const MAX_HEADER_VALUE_LEN: usize = 8_192;
 /// Maximum adapter-level timeout in milliseconds.
 pub const MAX_TIMEOUT_MS: u64 = 300_000;
-/// Maximum adapter-level body cap in bytes.
-pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum adapter-level request body cap in bytes.
+pub const MAX_BODY_BYTES: usize = DEFAULT_MAX_REQUEST_BODY_BYTES;
+/// Maximum adapter-level response body cap in bytes.
+pub const MAX_RESPONSE_BODY_BYTES: usize = DEFAULT_MAX_RESPONSE_BODY_BYTES;
 /// Maximum total simultaneous connections a served endpoint will accept.
 pub const MAX_TOTAL_CONNECTIONS: usize = 100_000;
 /// Maximum header block size in bytes accepted for a served endpoint.
@@ -418,7 +421,7 @@ pub fn coerce_fetch_options(raw: RawFetchOptions) -> Result<FetchOptions, Adapte
         .transpose()?;
     let max_response_body_bytes = raw
         .max_response_body_bytes
-        .map(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES))
+        .map(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_RESPONSE_BODY_BYTES))
         .transpose()?;
     Ok(FetchOptions {
         node_id: raw.node_id,
@@ -836,10 +839,10 @@ mod tests {
             f64::INFINITY,
             -1.0,
             1.5,
-            (MAX_BODY_BYTES + 1) as f64,
+            (MAX_RESPONSE_BODY_BYTES + 1) as f64,
         ] {
             assert!(matches!(
-                safe_f64_to_usize(value, "maxResponseBodyBytes", MAX_BODY_BYTES),
+                safe_f64_to_usize(value, "maxResponseBodyBytes", MAX_RESPONSE_BODY_BYTES),
                 Err(AdapterInputError::InvalidArgument {
                     field: "maxResponseBodyBytes",
                     ..
@@ -992,6 +995,47 @@ mod tests {
     }
 
     #[test]
+    fn coerce_fetch_options_accepts_response_limits_through_core_default() {
+        const CORE_DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 256 * 1024 * 1024;
+
+        for value in [
+            MAX_BODY_BYTES,
+            64 * 1024 * 1024,
+            CORE_DEFAULT_MAX_RESPONSE_BODY_BYTES,
+        ] {
+            let options = coerce_fetch_options(RawFetchOptions {
+                node_id: "aaaa".to_string(),
+                url: "httpi://peer/".to_string(),
+                method: "GET".to_string(),
+                direct_addrs: None,
+                headers: vec![],
+                timeout_ms: None,
+                max_response_body_bytes: Some(value as f64),
+            })
+            .expect("response limit through the core default should be accepted");
+
+            assert_eq!(options.max_response_body_bytes, Some(value));
+        }
+
+        let too_large = coerce_fetch_options(RawFetchOptions {
+            node_id: "aaaa".to_string(),
+            url: "httpi://peer/".to_string(),
+            method: "GET".to_string(),
+            direct_addrs: None,
+            headers: vec![],
+            timeout_ms: None,
+            max_response_body_bytes: Some((CORE_DEFAULT_MAX_RESPONSE_BODY_BYTES + 1) as f64),
+        });
+        assert!(matches!(
+            too_large,
+            Err(AdapterInputError::InvalidArgument {
+                field: "maxResponseBodyBytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn coerce_endpoint_options_validates_and_coerces() {
         let ok = coerce_endpoint_options(RawEndpointOptions {
             idle_timeout_ms: Some(1000.0),
@@ -1068,5 +1112,21 @@ mod tests {
                 ..
             })
         ));
+
+        for bad in [
+            RawServeOptions {
+                max_request_body_wire_bytes: Some((MAX_BODY_BYTES + 1) as f64),
+                ..Default::default()
+            },
+            RawServeOptions {
+                max_request_body_decoded_bytes: Some((MAX_BODY_BYTES + 1) as f64),
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                coerce_serve_options(bad),
+                Err(AdapterInputError::InvalidArgument { .. })
+            ));
+        }
     }
 }

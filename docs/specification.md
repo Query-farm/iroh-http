@@ -188,6 +188,15 @@ interface IrohFetchInit extends RequestInit {
   directAddrs?: string[];
   /** Explicit home relay URL, usually obtained from peer discovery. */
   relayUrl?: string;
+  /** Per-request timeout in milliseconds. Maximum: 300 000. */
+  requestTimeout?: number;
+  /** Whether to decompress the response body. Default: true. */
+  decompress?: boolean;
+  /**
+   * Maximum decompressed response body size in bytes for this request.
+   * Range: 0 through 268 435 456 (256 MiB). Default: 256 MiB.
+   */
+  maxResponseBodyBytes?: number;
 }
 ```
 

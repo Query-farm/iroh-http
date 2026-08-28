@@ -102,8 +102,9 @@ export interface IrohFetchInit extends RequestInit {
    */
   decompress?: boolean;
   /**
-   * Per-call response body byte limit.  When set, overrides the endpoint-wide
-   * `maxResponseBodyBytes` default for this single request.
+   * Maximum decompressed response body bytes accepted for this request.
+   * Must be an integer from 0 through 268_435_456 (256 MiB). When omitted,
+   * the core default is 256 MiB.
    */
   maxResponseBodyBytes?: number;
 }
@@ -118,7 +119,7 @@ export interface FetchOptions {
   timeoutMs?: number;
   /** When `false`, the response body is not decompressed. @default true */
   decompress?: boolean;
-  /** Per-call response body byte limit.  Overrides endpoint default. */
+  /** Per-call response body byte limit. Range: 0 through 256 MiB. */
   maxResponseBodyBytes?: number;
 }
 
