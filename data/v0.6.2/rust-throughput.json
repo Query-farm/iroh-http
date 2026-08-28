@@ -1,0 +1,42 @@
+[
+  {
+    "name": "rust/throughput_post_body/1024",
+    "unit": "MB/s",
+    "value": 4.636440466453622
+  },
+  {
+    "name": "rust/throughput_post_body/1048576",
+    "unit": "MB/s",
+    "value": 432.61355639763497
+  },
+  {
+    "name": "rust/throughput_post_body/10485760",
+    "unit": "MB/s",
+    "value": 417.60750137001156
+  },
+  {
+    "name": "rust/throughput_post_body/65536",
+    "unit": "MB/s",
+    "value": 182.99309261659056
+  },
+  {
+    "name": "rust/throughput_response_body/1024",
+    "unit": "MB/s",
+    "value": 4.131773202586343
+  },
+  {
+    "name": "rust/throughput_response_body/1048576",
+    "unit": "MB/s",
+    "value": 402.22813745803745
+  },
+  {
+    "name": "rust/throughput_response_body/10485760",
+    "unit": "MB/s",
+    "value": 416.9046173381277
+  },
+  {
+    "name": "rust/throughput_response_body/65536",
+    "unit": "MB/s",
+    "value": 185.65794935532875
+  }
+]
