@@ -119,9 +119,9 @@ Coverage by module:
 | `lib.rs` — base32 | `base32_encode` never panics, empty input → empty output |
 | `lib.rs` — crypto | sign→verify roundtrip, `secret_key_sign` / `public_key_verify` never panic on arbitrary keys |
 | `lib.rs` — errors | `core_error_to_json` / `format_error_json` always produce valid JSON |
-| `endpoint.rs` | `parse_direct_addrs` never panics |
-| `server.rs` | `respond` never panics on arbitrary status codes + headers |
-| `stream.rs` | HandleStore capacity bounds, invalid-handle safety, reader/writer insert→cancel roundtrip, pending-reader store→claim roundtrip |
+| `endpoint/bind.rs` | `parse_direct_addrs` never panics |
+| `ffi/dispatcher.rs` | `respond` never panics on arbitrary status codes + headers |
+| `ffi/handles.rs` | HandleStore capacity bounds, invalid-handle safety, reader/writer insert→cancel roundtrip, pending-reader store→claim roundtrip |
 
 When adding a new `pub fn` to the crate, add a corresponding
 `_never_panics` proptest so every entry point has at least a basic
