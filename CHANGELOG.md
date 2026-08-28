@@ -1,3 +1,28 @@
+## [0.6.2] - 2026-08-28
+
+### 🐛 Bug Fixes
+
+- *(adapter)* Align response body limit with core (#394)
+- *(deno)* Wake idle serve loops on demand (#398)
+
+### 💼 Other
+
+- *(deps)* Refresh Rust security fixes
+- *(deps)* Refresh npm security fixes
+- *(deps)* Roll up release dependency patches
+
+### 📚 Documentation
+
+- Refresh release roadmap and architecture
+- Correct benchmark workflow behavior (#399)
+
+### 🧪 Testing
+
+- *(adapter)* Add response limit regression (#394)
+
+### ⚙️ Miscellaneous Tasks
+
+- Ignore Android/Gradle build artifacts
 ## [0.6.1] - 2026-07-21
 
 ### 🐛 Bug Fixes
