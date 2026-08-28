@@ -1,6 +1,6 @@
 # Roadmap
 
-## Current state — v0.2.x (testing phase)
+## Current state — v0.6.x (testing phase)
 
 The library is functionally complete and published on npm and JSR, but we are
 in an active testing phase before calling anything "stable". Semver signals
@@ -18,7 +18,7 @@ this: all packages are `0.x`. Breaking changes are possible.
 - [x] `CHANGELOG.md` — generated via `git-cliff` and updated each release in CI
 - [x] `SECURITY.md` — GitHub Security Advisories disclosure policy
 - [x] Repository public on GitHub
-- [x] All GitHub issues resolved through v0.2.x
+- [x] Planned release work through v0.6.1 shipped
 - [x] Node.js — napi-rs platform packages + `optionalDependencies` wiring (all 5 targets)
 - [x] `node.stats()` — node-wide `EndpointStats` (active connections, requests, handles, pool size)
 - [x] Transport events — `pool:hit`, `pool:miss`, `pool:evict`, `path:change`, `handle:sweep`
@@ -69,17 +69,6 @@ The observability spec documents a planned `iroh-path-type` response header
 the server layer. The blocker is that iroh does not yet expose stable
 per-connection path metadata in its public API. Track upstream; add the header
 once the API stabilises.
-
-### Documentation accuracy pass
-
-Several feature docs were written ahead of implementation and now lag behind.
-Specifically:
-- [observability.md](features/observability.md) still says `stats()` is
-  "planned but not yet implemented" — it is implemented.
-- [architecture.md](architecture.md) should reflect the finalized hyper v1
-  decision and the current file layout.
-
----
 
 ## Horizon 2 — HTTP/3
 

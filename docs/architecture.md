@@ -39,15 +39,13 @@ Any deviation from these contracts is a bug unless explicitly documented.
 ┌────────────────────────▼─────────────────────────────────────┐
 │  iroh-http-core (Rust)                                        │
 │                                                              │
-│  client.rs   — fetch()                                       │
-│  server.rs   — serve(), IrohHttpService + FfiDispatcher,    │
-│                drain                                         │
-│  pool.rs     — moka-backed single-flight connection pool     │
-│  stream.rs   — slotmap handle registries, body channels      │
-│  session.rs  — session/WebTransport-style API                │
-│  endpoint.rs — IrohEndpoint, NodeOptions, ServeOptions       │
-│  io.rs       — IrohStream: AsyncRead+AsyncWrite adapter      │
-│  lib.rs      — CoreError/ErrorCode, FFI types, re-exports   │
+│  http/       — client/server pipeline and QUIC transport      │
+│  endpoint/   — endpoint lifecycle, configuration, statistics │
+│  ffi/        — dispatch, handles, pumps, sessions, FFI types  │
+│  addr.rs     — node address parsing                          │
+│  crypto.rs   — key generation, signing, verification         │
+│  error.rs    — CoreError/ErrorCode                           │
+│  lib.rs      — public API and re-exports                     │
 └──────┬──────────────────────────────┬────────────────────────┘
        │                              │
 ┌──────▼──────────┐        ┌──────────▼───────────────────────┐
@@ -74,14 +72,14 @@ The Rust crate that owns all transport logic. Platform adapters depend only on i
 
 | File | Responsibility |
 |------|----------------|
-| `client.rs` | `fetch()`. Obtains a QUIC connection via the pool, wraps it in `IrohStream`, drives hyper's HTTP/1.1 client, pumps the response body into handle-based channels. |
-| `server.rs` | `serve()`. Accepts QUIC connections, spawns per-stream hyper HTTP/1.1 handlers, enforces concurrency via drain semaphore, and composes the standard `tower-http` reliability stack (`CompressionLayer`, `RequestDecompressionLayer`, `TimeoutLayer`, `ConcurrencyLimitLayer`, `LoadShedLayer`) per ADR-014. `IrohHttpService` is the thin `tower::Service<Request<B>, Response = Response<Body>, Error = Infallible>` shell at the hyper boundary; it delegates each request to `FfiDispatcher`, which owns the JS-bridge concerns (handle allocation, `on_request` firing, body-channel pumping, response-head rendezvous, duplex upgrade). The only bespoke layer in the stack is `HandleLayerError`, which converts `tower::timeout::Elapsed` / `tower::load_shed::Overloaded` errors into 408 / 503 responses (no `axum::error_handling::HandleErrorLayer` equivalent exists in plain tower / tower-http — see ADR-013). |
-| `pool.rs` | `ConnectionPool`. moka async cache keyed by `NodeId`. `try_get_with` provides single-flight connection establishment — concurrent fetches to the same peer share one connection attempt. Failed attempts are not cached. |
-| `stream.rs` | All resource handle registries (body readers, writers, fetch tokens, sessions, request heads). Uses `slotmap` for generational u64 keys. Also defines backpressure config (channel capacity, max chunk size). |
-| `session.rs` | Session lifecycle: `session_connect` (non-pooled dedicated connections), bidirectional/unidirectional streams, datagrams. Session registry. |
-| `endpoint.rs` | `IrohEndpoint` (cheap `Arc` clone). Bind, share, close. `NodeOptions` for QUIC transport config, discovery, relay. `ServeOptions` for server limits. `CompressionOptions` (feature-gated). |
-| `io.rs` | `IrohStream`: merges Iroh's split `SendStream`/`RecvStream` into a single `AsyncRead + AsyncWrite` type that hyper can drive directly via `hyper_util::rt::TokioIo`. |
-| `lib.rs` | `CoreError`/`ErrorCode` enum, `FfiResponse`, `RequestPayload`, ALPN constants, crypto helpers (sign/verify), base32 encoding, node ticket parsing, `core_error_to_json`/`format_error_json` serializers. |
+| `http/client.rs` | Pure-Rust `fetch_request()`. Obtains a QUIC connection via the pool, wraps it in `IrohStream`, drives hyper's HTTP/1.1 client, and returns `Response<Body>`. The FFI wrapper and response-body pumps live in `ffi/fetch.rs`. |
+| `http/server/` | `serve()`. Accepts QUIC connections, spawns per-stream hyper HTTP/1.1 handlers, enforces the global request cap through a shared tower `ConcurrencyLimitLayer`, and composes the standard `tower-http` reliability stack (`CompressionLayer`, `RequestDecompressionLayer`, `TimeoutLayer`, `LoadShedLayer`) per ADR-014. `IrohHttpService` is the concrete `tower::Service<Request<Body>, Response = Response<Body>, Error = Infallible>` shell at the hyper boundary; it delegates each request to `FfiDispatcher`, which owns the JS-bridge concerns (handle allocation, `on_request` firing, body-channel pumping, response-head rendezvous, duplex upgrade). The only bespoke layer in the stack is `HandleLayerError`, which converts `tower::timeout::Elapsed` / `tower::load_shed::Overloaded` errors into 408 / 503 responses (no `axum::error_handling::HandleErrorLayer` equivalent exists in plain tower / tower-http — see ADR-013). |
+| `http/transport/pool.rs` | `ConnectionPool`. moka async cache keyed by `NodeId`. `try_get_with` provides single-flight connection establishment — concurrent fetches to the same peer share one connection attempt. Failed attempts are not cached. |
+| `http/transport/io.rs` | `IrohStream`: merges Iroh's split `SendStream`/`RecvStream` into a single `AsyncRead + AsyncWrite` type that hyper can drive directly via `hyper_util::rt::TokioIo`. |
+| `endpoint/` | `IrohEndpoint` lifecycle, transport and resolver configuration, discovery, statistics, observation, and the HTTP/session runtimes. |
+| `ffi/` | Resource registries, request dispatch, body pumps, session operations, and FFI-facing types. Registries use `slotmap` for generational u64 keys. |
+| `addr.rs`, `crypto.rs`, `encoding.rs` | Node-address parsing, signing and verification, key handling, and base32 encoding. |
+| `error.rs`, `lib.rs` | `CoreError`/`ErrorCode`, error serializers, ALPN constants, the public API, and re-exports. |
 
 ### Platform Adapters
 
@@ -89,7 +87,7 @@ Each adapter is a thin FFI shim — no logic, no state, just type translation:
 
 | Crate | FFI | Language |
 |-------|-----|----------|
-| `iroh-http-node` | napi-rs v2 | Node.js / Bun |
+| `iroh-http-node` | napi-rs v3 | Node.js / Bun |
 | `iroh-http-deno` | Deno FFI (`dlopen`) | Deno |
 | `iroh-http-tauri` | Tauri invoke | Tauri (desktop/mobile) |
 
@@ -156,12 +154,15 @@ Host: <node-id>\r\n
 
 ## Concurrency Model
 
-The drain semaphore in `server.rs` is the central concurrency gate:
+The shared `ConcurrencyLimitLayer` built in `http/server/accept.rs` is the
+central concurrency gate:
 
-- `max_concurrency` (default: 1024) = initial semaphore permits
-- One permit acquired **per QUIC bi-stream** (= per HTTP request), not per connection
-- Permit drops when hyper finishes serving the request
-- `drain()` acquires all permits → blocks until every in-flight request completes
+- `max_concurrency` (default: 1024) sets the shared tower limiter capacity.
+- One permit is held **per QUIC bi-stream** (= per HTTP request), not per connection.
+- The permit is released when the request service future completes.
+- Graceful drain is tracked separately by `DeliveryTracker` in
+  `http/server/lifecycle.rs`; an atomic in-flight counter and `Notify` wait
+  until responses are transport-acknowledged, stopped, or failed.
 
 This bounds total in-flight requests across all peers. Per-peer limits are enforced separately via `max_connections_per_peer`.
 
