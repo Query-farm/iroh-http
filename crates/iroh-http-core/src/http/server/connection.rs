@@ -614,9 +614,8 @@ pub(super) fn validate_http_connection(
 }
 
 fn drain_deadline(timeout: Duration) -> tokio::time::Instant {
-    tokio::time::Instant::now()
-        .checked_add(timeout)
-        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400))
+    let now = tokio::time::Instant::now();
+    now.checked_add(timeout).unwrap_or(now)
 }
 
 async fn wait_for_zero_until(
