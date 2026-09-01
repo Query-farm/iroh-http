@@ -99,6 +99,18 @@ impl ConnectionServeOptions {
                 reason: "must be greater than zero",
             });
         }
+        if self.max_connections_per_peer > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(ConnectionServeError::InvalidOptions {
+                option: "max_connections_per_peer",
+                reason: "exceeds Tokio's supported admission limit",
+            });
+        }
+        if self.max_total_connections > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(ConnectionServeError::InvalidOptions {
+                option: "max_total_connections",
+                reason: "exceeds Tokio's supported admission limit",
+            });
+        }
         if self.connection_idle_timeout.is_zero() {
             return Err(ConnectionServeError::InvalidOptions {
                 option: "connection_idle_timeout",
@@ -115,6 +127,12 @@ impl ConnectionServeOptions {
             return Err(ConnectionServeError::InvalidOptions {
                 option: "max_concurrency",
                 reason: "exceeds Tokio's semaphore permit limit",
+            });
+        }
+        if self.max_header_size != 0 && self.max_header_size < 8192 {
+            return Err(ConnectionServeError::InvalidOptions {
+                option: "max_header_size",
+                reason: "must be zero or at least Hyper's 8192-byte floor",
             });
         }
         Ok(())
@@ -189,11 +207,55 @@ struct ConnectionServeInner {
     requests: Arc<AtomicUsize>,
     deliveries: Arc<AtomicUsize>,
     drain_notify: Arc<tokio::sync::Notify>,
-    no_new_streams: AtomicBool,
+    stream_admission: StreamAdmissionBarrier,
     close_flag: Arc<AtomicBool>,
     close_connections: Arc<tokio::sync::Notify>,
     drained: AtomicBool,
     shutdown: tokio::sync::OnceCell<bool>,
+}
+
+/// Serializes stream counter acquisition with the transition to draining.
+///
+/// The lock is held only for one flag check and two atomic increments. It
+/// closes the window where shutdown could observe zero deliveries after a
+/// stream had been accepted but before that stream became visible to drain.
+struct StreamAdmissionBarrier {
+    gate: Mutex<()>,
+    stopped: AtomicBool,
+}
+
+impl StreamAdmissionBarrier {
+    fn new() -> Self {
+        Self {
+            gate: Mutex::new(()),
+            stopped: AtomicBool::new(false),
+        }
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    fn try_admit(&self, requests: &AtomicUsize, deliveries: &AtomicUsize) -> bool {
+        let _gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.stopped.load(Ordering::Acquire) {
+            return false;
+        }
+        requests.fetch_add(1, Ordering::Relaxed);
+        deliveries.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn stop(&self) {
+        let _gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.stopped.store(true, Ordering::Release);
+    }
 }
 
 /// Reusable owner for serving HTTP on connections accepted by an external
@@ -273,7 +335,7 @@ impl ConnectionServeRuntime {
                 requests,
                 deliveries: Arc::new(AtomicUsize::new(0)),
                 drain_notify: Arc::new(tokio::sync::Notify::new()),
-                no_new_streams: AtomicBool::new(false),
+                stream_admission: StreamAdmissionBarrier::new(),
                 close_flag,
                 close_connections,
                 drained: AtomicBool::new(false),
@@ -357,7 +419,7 @@ impl ConnectionServeRuntime {
         let effective_header_limit = if self.inner.options.max_header_size == 0 {
             64 * 1024
         } else {
-            self.inner.options.max_header_size.max(8192)
+            self.inner.options.max_header_size
         };
         let mut requests = tokio::task::JoinSet::new();
 
@@ -373,7 +435,7 @@ impl ConnectionServeRuntime {
                 connection.close(0u32.into(), b"HTTP serve runtime stopped");
                 break;
             }
-            if self.inner.no_new_streams.load(Ordering::Acquire) {
+            if self.inner.stream_admission.is_stopped() {
                 close.as_mut().await;
                 continue;
             }
@@ -397,10 +459,15 @@ impl ConnectionServeRuntime {
             let (send, recv) = match accepted {
                 None => continue,
                 Some(Ok(stream)) => {
-                    // A stream may complete accept concurrently with the
-                    // shutdown store. Refuse that late stream before tracking
-                    // or dispatching it so drain cannot observe a false zero.
-                    if self.inner.no_new_streams.load(Ordering::Acquire) {
+                    // Counter acquisition and shutdown's transition to drain
+                    // share one short gate. The stream is therefore either
+                    // visible to drain or rejected; it cannot land between
+                    // the stop flag and drain's first zero observation.
+                    if !self
+                        .inner
+                        .stream_admission
+                        .try_admit(&self.inner.requests, &self.inner.deliveries)
+                    {
                         drop(stream);
                         continue;
                     }
@@ -419,8 +486,6 @@ impl ConnectionServeRuntime {
             let delivery_counter = Arc::clone(&self.inner.deliveries);
             let drain_notify = Arc::clone(&self.inner.drain_notify);
             let request_stack = stack.clone();
-            request_counter.fetch_add(1, Ordering::Relaxed);
-            delivery_counter.fetch_add(1, Ordering::Relaxed);
             let header_read_timeout = self.inner.options.request_timeout;
 
             requests.spawn(async move {
@@ -470,7 +535,7 @@ impl ConnectionServeRuntime {
             .inner
             .shutdown
             .get_or_init(|| async {
-                self.inner.no_new_streams.store(true, Ordering::Release);
+                self.inner.stream_admission.stop();
                 let deadline = drain_deadline(self.inner.options.drain_timeout);
                 let drained =
                     wait_for_zero_until(&self.inner.deliveries, &self.inner.drain_notify, deadline)
@@ -575,6 +640,36 @@ fn report_request_join(completed: Option<Result<(), tokio::task::JoinError>>) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn shutdown_barrier_rejects_a_stream_after_its_early_observation() {
+        let barrier = Arc::new(StreamAdmissionBarrier::new());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let deliveries = Arc::new(AtomicUsize::new(0));
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+
+        let late_barrier = Arc::clone(&barrier);
+        let late_requests = Arc::clone(&requests);
+        let late_deliveries = Arc::clone(&deliveries);
+        let late = tokio::spawn(async move {
+            // This is the old pre-increment observation that raced with
+            // shutdown. Pause here so shutdown deterministically wins the
+            // shared gate before the stream attempts counter acquisition.
+            assert!(!late_barrier.is_stopped());
+            observed_tx.send(()).expect("signal early observation");
+            resume_rx.await.expect("resume late stream");
+            late_barrier.try_admit(&late_requests, &late_deliveries)
+        });
+
+        observed_rx.await.expect("late stream reached race window");
+        barrier.stop();
+        resume_tx.send(()).expect("release late stream");
+
+        assert!(!late.await.expect("late admission task joined"));
+        assert_eq!(requests.load(Ordering::Acquire), 0);
+        assert_eq!(deliveries.load(Ordering::Acquire), 0);
+    }
+
     #[test]
     fn options_reject_zero_concurrency_without_panicking() {
         let error = ConnectionServeOptions {
@@ -631,20 +726,70 @@ mod tests {
     }
 
     #[test]
-    fn options_reject_concurrency_above_tokio_limit_without_panicking() {
+    fn options_reject_admission_counts_above_tokio_limit_without_panicking() {
+        for (option, options) in [
+            (
+                "max_connections_per_peer",
+                ConnectionServeOptions {
+                    max_connections_per_peer: usize::MAX,
+                    ..ConnectionServeOptions::default()
+                },
+            ),
+            (
+                "max_total_connections",
+                ConnectionServeOptions {
+                    max_total_connections: usize::MAX,
+                    ..ConnectionServeOptions::default()
+                },
+            ),
+            (
+                "max_concurrency",
+                ConnectionServeOptions {
+                    max_concurrency: usize::MAX,
+                    ..ConnectionServeOptions::default()
+                },
+            ),
+        ] {
+            let error = options
+                .validate()
+                .expect_err("oversized admission count must be rejected");
+            assert!(matches!(
+                error,
+                ConnectionServeError::InvalidOptions {
+                    option: rejected,
+                    ..
+                } if rejected == option
+            ));
+        }
+    }
+
+    #[test]
+    fn options_reject_header_limits_below_hyper_floor() {
         let error = ConnectionServeOptions {
-            max_concurrency: usize::MAX,
+            max_header_size: 8191,
             ..ConnectionServeOptions::default()
         }
         .validate()
-        .expect_err("oversized concurrency must be rejected before tower construction");
+        .expect_err("misleading sub-Hyper header limit must be rejected");
         assert!(matches!(
             error,
             ConnectionServeError::InvalidOptions {
-                option: "max_concurrency",
+                option: "max_header_size",
                 ..
             }
         ));
+        assert!(ConnectionServeOptions {
+            max_header_size: 0,
+            ..ConnectionServeOptions::default()
+        }
+        .validate()
+        .is_ok());
+        assert!(ConnectionServeOptions {
+            max_header_size: 8192,
+            ..ConnectionServeOptions::default()
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]

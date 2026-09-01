@@ -56,7 +56,8 @@ proptest! {
         );
         prop_assert_eq!(
             result.is_ok(),
-            (1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&max_concurrency),
+            (1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&max_concurrency)
+                && (max_header_size == 0 || max_header_size >= 8192),
         );
     }
 }

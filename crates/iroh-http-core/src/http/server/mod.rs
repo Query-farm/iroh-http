@@ -172,7 +172,11 @@ where
                 options.drain_timeout_ms.unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS),
             ),
             load_shed: options.load_shed.unwrap_or(true),
-            max_header_size: endpoint.max_header_size(),
+            // Hyper cannot enforce a receive buffer below 8192 bytes. The
+            // endpoint/FFI dispatcher retains and enforces its exact smaller
+            // post-parse budget; this transport option must represent the
+            // distinct Hyper framing bound accepted by ConnectionServeOptions.
+            max_header_size: endpoint.max_header_size().max(8192),
             compression: endpoint.compression().cloned(),
             decompression: options.decompression.unwrap_or(true),
         },
