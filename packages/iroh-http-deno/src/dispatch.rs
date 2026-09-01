@@ -797,6 +797,7 @@ async fn serve_start(p: Value) -> Value {
         max_concurrency: p["maxConcurrency"].as_u64().map(|v| v as usize),
         max_connections_per_peer: p["maxConnectionsPerPeer"].as_u64().map(|v| v as usize),
         request_timeout_ms: serve.request_timeout_ms,
+        connection_idle_timeout_ms: None,
         max_request_body_wire_bytes: serve.max_request_body_wire_bytes,
         max_request_body_decoded_bytes: serve.max_request_body_decoded_bytes,
         max_total_connections: serve.max_total_connections,
