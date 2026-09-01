@@ -45,6 +45,34 @@ When a new failure mode is added, add a new error code. Never rely on the catch-
 - Shutdown signaling uses `tokio::sync::Notify`. Do not use `watch` channels for shutdown — dropping a `watch::Sender` causes spurious wakeups.
 - Wrap every async I/O operation in a timeout. An await without a bound is a latent hang.
 
+## External Iroh routers
+
+When another component owns the Iroh endpoint or `Router`, create one
+`ConnectionServeRuntime` and clone it into each HTTP protocol-handler call:
+
+```rust,ignore
+let runtime = ConnectionServeRuntime::new(
+    ConnectionServeOptions::default(),
+    service,
+)?;
+
+// In the external router's handler for iroh_http_core::ALPN:
+runtime.serve_connection(connection).await?;
+
+// On router shutdown, after it stops dispatching new connections:
+runtime.shutdown().await;
+```
+
+The reusable runtime makes request concurrency and drain state global to the
+external router. The one-shot `serve_connection(connection, options, service)`
+helper is intentionally scoped to one connection. Neither connection-only API
+claims endpoint connection caps, endpoint statistics, or connection events.
+
+Every dispatched request contains both `RemoteEndpointId` and the compatible
+base32 `RemoteNodeId`. Identity bridges must take raw bytes from
+`RemoteEndpointId.0.as_bytes()` and encode those bytes as 64 lowercase hex
+characters; never reverse-decode the legacy display string.
+
 ---
 
 ## Doc Comments

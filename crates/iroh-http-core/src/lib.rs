@@ -37,8 +37,10 @@ pub mod registry {
 pub use http::body::{Body, BoxError};
 pub use http::client::{fetch_request, FetchError};
 pub use http::server::{
-    serve, serve_with_events, RemoteNodeId, ServeHandle, ServeOptions,
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_RESPONSE_BODY_BYTES,
+    serve, serve_connection, serve_with_events, ConnectionServeEnd, ConnectionServeError,
+    ConnectionServeOptions, ConnectionServeResult, ConnectionServeRuntime, RemoteEndpointId,
+    RemoteNodeId, ServeHandle, ServeOptions, DEFAULT_MAX_REQUEST_BODY_BYTES,
+    DEFAULT_MAX_RESPONSE_BODY_BYTES,
 };
 
 // ── FFI bridge surface (`mod ffi`) ────────────────────────────────

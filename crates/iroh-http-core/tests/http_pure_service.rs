@@ -19,7 +19,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use iroh_http_core::{fetch, serve, Body, RemoteNodeId, ServeOptions};
+use iroh_http_core::{fetch, serve, Body, RemoteEndpointId, RemoteNodeId, ServeOptions};
 use tower::Service;
 
 #[derive(Clone)]
@@ -43,9 +43,13 @@ impl Service<hyper::Request<Body>> for EchoPeerService {
             .get::<RemoteNodeId>()
             .map(|r| (*r.0).clone())
             .unwrap_or_default();
+        let raw_peer = req
+            .extensions()
+            .get::<RemoteEndpointId>()
+            .map(|identity| identity.0);
         let path = req.uri().path().to_string();
         Box::pin(async move {
-            let body = format!("path={path} peer={peer}");
+            let body = format!("path={path} peer={peer} raw_peer={raw_peer:?}");
             Ok(hyper::Response::builder()
                 .status(200)
                 .header("content-type", "text/plain")
@@ -61,6 +65,7 @@ async fn pure_rust_serve_round_trips_with_peer_id_extension() {
     let server_id = common::node_id(&server_ep);
     let addrs = common::server_addrs(&server_ep);
     let client_id = common::node_id(&client_ep);
+    let client_endpoint_id = client_ep.raw().id();
 
     let _handle = serve(server_ep.clone(), ServeOptions::default(), EchoPeerService);
 
@@ -95,6 +100,10 @@ async fn pure_rust_serve_round_trips_with_peer_id_extension() {
     let body = String::from_utf8(body).expect("utf8 body");
     assert!(body.contains("path=/hello-pure"), "body: {body}");
     assert!(body.contains(&format!("peer={client_id}")), "body: {body}");
+    assert!(
+        body.contains(&format!("raw_peer=Some({client_endpoint_id:?})")),
+        "body: {body}"
+    );
 
     // Make Arc references reachable so import is not unused on doc scrape
     let _ = Arc::new(());

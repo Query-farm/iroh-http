@@ -162,8 +162,9 @@ pub async fn fetch(
 /// request is handed to the exact same [`crate::ffi::dispatcher::IrohHttpService`]
 /// that remote peers reach, as an in-process `tower::Service` call. The node's
 /// own id is injected as the authenticated [`crate::http::server::RemoteNodeId`]
-/// — truthful, since the peer is us. Cancellation and `timeout` mirror the QUIC
-/// path; the response is packaged identically via [`package_response`].
+/// and [`crate::http::server::RemoteEndpointId`] — truthful, since the peer is
+/// us. Cancellation and `timeout` mirror the QUIC path; the response is
+/// packaged identically via [`package_response`].
 ///
 /// This deliberately bypasses the wire: no QUIC/TLS handshake, no compression
 /// negotiation, and none of the per-connection server stack (timeouts and body
@@ -195,6 +196,8 @@ async fn self_fetch(
         .insert(crate::http::server::RemoteNodeId(std::sync::Arc::new(
             remote_str.to_string(),
         )));
+    req.extensions_mut()
+        .insert(crate::http::server::RemoteEndpointId(endpoint.raw().id()));
 
     // `IrohHttpService` is `Infallible`; dispatch and await the response head.
     let dispatch = async move {

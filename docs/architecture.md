@@ -162,8 +162,8 @@ Host: <node-id>\r\n
 
 ## Concurrency Model
 
-The shared `ConcurrencyLimitLayer` built in `http/server/accept.rs` is the
-central concurrency gate:
+The shared `GlobalConcurrencyLimitLayer` owned by the server connection runtime is
+the central concurrency gate:
 
 - `max_concurrency` (default: 1024) sets the shared tower limiter capacity.
 - One permit is held **per QUIC bi-stream** (= per HTTP request), not per connection.
@@ -173,6 +173,13 @@ central concurrency gate:
   until responses are transport-acknowledged, stopped, or failed.
 
 This bounds total in-flight requests across all peers. Per-peer limits are enforced separately via `max_connections_per_peer`.
+
+Whole-endpoint `serve` creates one connection runtime for its accept loop.
+External Iroh routers must likewise create one `ConnectionServeRuntime` and
+clone it into each connection handler; the one-shot `serve_connection`
+convenience API only promises a per-connection gate. Endpoint connection caps,
+statistics, and connection events are not fabricated by the connection-only
+API because it does not own the endpoint acceptor.
 
 ---
 

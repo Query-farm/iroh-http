@@ -122,6 +122,7 @@ Coverage by module:
 | `endpoint/bind.rs` | `parse_direct_addrs` never panics |
 | `ffi/dispatcher.rs` | `respond` never panics on arbitrary status codes + headers |
 | `ffi/handles.rs` | HandleStore capacity bounds, invalid-handle safety, reader/writer insert→cancel roundtrip, pending-reader store→claim roundtrip |
+| `http/server/connection.rs` | Arbitrary connection-runtime limits either construct safely or return a typed option error |
 
 When adding a new `pub fn` to the crate, add a corresponding
 `_never_panics` proptest so every entry point has at least a basic

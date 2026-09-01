@@ -9,7 +9,8 @@
 
 use iroh_http_core::{
     base32_encode, generate_secret_key, parse_direct_addrs, parse_node_addr, public_key_verify,
-    respond, secret_key_sign, HandleStore, NodeAddrInfo, StoreConfig,
+    respond, secret_key_sign, Body, ConnectionServeOptions, ConnectionServeRuntime, HandleStore,
+    NodeAddrInfo, StoreConfig,
 };
 use proptest::prelude::*;
 
@@ -31,6 +32,32 @@ proptest! {
         if let Ok(ticket) = serde_json::to_string(&info) {
             let _ = parse_node_addr(&ticket);
         }
+    }
+}
+
+// ── server connection runtime boundary ──────────────────────────────────────
+
+proptest! {
+    #[test]
+    fn connection_runtime_options_never_panic(
+        max_concurrency in any::<usize>(),
+        max_header_size in any::<usize>(),
+        drain_millis in any::<u64>(),
+    ) {
+        let mut options = ConnectionServeOptions::default();
+        options.max_concurrency = max_concurrency;
+        options.max_header_size = max_header_size;
+        options.drain_timeout = std::time::Duration::from_millis(drain_millis);
+        let result = ConnectionServeRuntime::new(
+            options,
+            tower::service_fn(|_request: hyper::Request<Body>| async {
+                Ok::<_, std::convert::Infallible>(hyper::Response::new(Body::empty()))
+            }),
+        );
+        prop_assert_eq!(
+            result.is_ok(),
+            (1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&max_concurrency),
+        );
     }
 }
 

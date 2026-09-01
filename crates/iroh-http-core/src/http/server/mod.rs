@@ -4,7 +4,7 @@
 //! server connection. The user supplies a `tower::Service<Request<Body>,
 //! Response = Response<Body>, Error = Infallible>`; the per-connection
 //! `AddExtensionLayer` makes the authenticated peer id available as a
-//! [`RemoteNodeId`] request extension (closes #177).
+//! legacy [`RemoteNodeId`] and typed [`RemoteEndpointId`] request extensions.
 //!
 //! The accept loop body lives in [`accept`]; this file is the public
 //! surface and option-resolution glue, kept close to the axum reference
@@ -19,6 +19,7 @@
 //! other service.
 
 pub(crate) mod accept;
+pub(crate) mod connection;
 pub(crate) mod error_layer;
 pub(crate) mod handle;
 pub(crate) mod lifecycle;
@@ -42,6 +43,10 @@ use self::options::{
 // (`crate::http::server::ServeOptions`, `…::ServeHandle`,
 // `…::HandleLayerErrorLayer`, `…::DEFAULT_MAX_RESPONSE_BODY_BYTES`) stay
 // unchanged after Slice C.7 split.
+pub use self::connection::{
+    serve_connection, ConnectionServeEnd, ConnectionServeError, ConnectionServeOptions,
+    ConnectionServeResult, ConnectionServeRuntime,
+};
 pub(crate) use self::error_layer::HandleLayerErrorLayer;
 pub use self::handle::ServeHandle;
 pub use self::options::{
@@ -52,15 +57,28 @@ pub use self::options::{
 
 pub(crate) type ConnectionEventFn = Arc<dyn Fn(ConnectionEvent) + Send + Sync>;
 
-/// Authenticated peer node id of the QUIC connection a request arrived
-/// on. Inserted as a request extension by the per-connection
+/// Authenticated peer node id of the QUIC connection a request arrived on,
+/// encoded as lowercase, unpadded RFC 4648 base32 for compatibility. Inserted
+/// as a request extension by the per-connection
 /// [`tower_http::add_extension::AddExtensionLayer`] in
 /// [`serve_with_events`].
 ///
-/// User-facing pure-Rust services consume it with
-/// `req.extensions().get::<RemoteNodeId>()`. Closes #177.
+/// Existing pure-Rust services consume it with
+/// `req.extensions().get::<RemoteNodeId>()`. New bridges should prefer
+/// [`RemoteEndpointId`] so they never have to reverse-decode this string.
+/// Closes #177.
 #[derive(Clone, Debug)]
 pub struct RemoteNodeId(pub Arc<String>);
+
+/// Authenticated raw endpoint identity of the QUIC connection a request
+/// arrived on.
+///
+/// Bridges that need a canonical machine identity should encode
+/// `value.0.as_bytes()` directly as 64 lowercase hexadecimal characters.
+/// They must not recover raw bytes by decoding [`RemoteNodeId`], whose RFC
+/// 4648 base32 representation is retained for compatibility.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteEndpointId(pub iroh::EndpointId);
 
 /// Pure-Rust serve entry — convenience 3-arg wrapper that omits the
 /// connection-event callback. Equivalent to `serve_with_events(ep,
@@ -90,7 +108,7 @@ where
 /// hyper's HTTP/1.1 server connection through the per-connection tower
 /// stack composed in [`stack::build_stack`]; the user service sees
 /// requests with the authenticated peer id available as a typed
-/// [`RemoteNodeId`] request extension.
+/// [`RemoteNodeId`] and [`RemoteEndpointId`] request extensions.
 ///
 /// `on_connection_event` is called on 0→1 (first connection from a peer)
 /// and 1→0 (last connection from a peer closed) count transitions.
@@ -104,7 +122,8 @@ where
 /// Any peer that knows or discovers your node's public key can connect
 /// and send requests. Iroh QUIC authenticates the peer's *identity*
 /// cryptographically, but does not enforce *authorization*. Inspect
-/// [`RemoteNodeId`] in your service and reject untrusted peers.
+/// [`RemoteEndpointId`] (or the compatible [`RemoteNodeId`] string) in your
+/// service and reject untrusted peers.
 pub fn serve_with_events<S>(
     endpoint: IrohEndpoint,
     options: ServeOptions,
@@ -123,36 +142,39 @@ where
     S::Future: Send + 'static,
 {
     let cfg = AcceptConfig {
-        max: options.max_concurrency.unwrap_or(DEFAULT_CONCURRENCY),
-        request_timeout: options
-            .request_timeout_ms
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS)),
+        connection: ConnectionServeOptions {
+            max_concurrency: options.max_concurrency.unwrap_or(DEFAULT_CONCURRENCY),
+            // Preserve the endpoint API's established zero-means-disabled
+            // convention while the connection API expresses that as `None`.
+            request_timeout: match options.request_timeout_ms {
+                Some(0) => None,
+                Some(milliseconds) => Some(Duration::from_millis(milliseconds)),
+                None => Some(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS)),
+            },
+            max_request_body_wire_bytes: options
+                .max_request_body_wire_bytes
+                .or(Some(DEFAULT_MAX_REQUEST_BODY_BYTES)),
+            max_request_body_decoded_bytes: options
+                .max_request_body_decoded_bytes
+                .or(Some(DEFAULT_MAX_REQUEST_BODY_BYTES)),
+            drain_timeout: Duration::from_millis(
+                options.drain_timeout_ms.unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS),
+            ),
+            load_shed: options.load_shed.unwrap_or(true),
+            max_header_size: endpoint.max_header_size(),
+            compression: endpoint.compression().cloned(),
+            decompression: options.decompression.unwrap_or(true),
+        },
         max_conns_per_peer: options
             .max_connections_per_peer
             .unwrap_or(DEFAULT_MAX_CONNECTIONS_PER_PEER),
-        max_request_body_wire_bytes: options
-            .max_request_body_wire_bytes
-            .or(Some(DEFAULT_MAX_REQUEST_BODY_BYTES)),
-        max_request_body_decoded_bytes: options
-            .max_request_body_decoded_bytes
-            .or(Some(DEFAULT_MAX_REQUEST_BODY_BYTES)),
         max_total_connections: options.max_total_connections,
-        drain_timeout: Duration::from_millis(
-            options.drain_timeout_ms.unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS),
-        ),
-        // Load-shed is opt-out — default `true`.
-        load_shed_enabled: options.load_shed.unwrap_or(true),
-        max_header_size: endpoint.max_header_size(),
-        stack_compression: endpoint.compression().cloned(),
-        // Decompression is opt-out — default `true`.
-        decompression: options.decompression.unwrap_or(true),
     };
 
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let close_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let close_connections = Arc::new(tokio::sync::Notify::new());
-    let drain_dur = cfg.drain_timeout;
+    let drain_dur = cfg.connection.drain_timeout;
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
 
     // Register the cycle before spawning it. A stop racing after this point

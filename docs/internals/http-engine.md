@@ -42,6 +42,34 @@ hyper::server::conn::http1::Builder::new()
 
 `RequestService` implements `tower::Service<Request<Incoming>>`. Its `call` method drives the entire request lifecycle.
 
+### Already-negotiated connections
+
+External Iroh routers can hand an authenticated `iroh::endpoint::Connection`
+to `ConnectionServeRuntime::serve_connection`. The runtime performs the same
+ALPN validation, typed `RemoteEndpointId` plus compatible `RemoteNodeId`
+injection, Tower stack construction, header and body limits, slow-request-head
+timeout, delivery tracking, and drain/close sequence as the whole-endpoint
+`serve` API.
+
+`RemoteEndpointId` carries the authenticated 32-byte Iroh endpoint key without
+string conversion. Bridges should encode `RemoteEndpointId.0.as_bytes()`
+directly as 64 lowercase hexadecimal characters. `RemoteNodeId` remains the
+historical lowercase RFC 4648 base32 string; do not decode that display value
+to recover bridge identity bytes.
+
+Create one `ConnectionServeRuntime` for the router and clone it into protocol
+handler calls. Its request concurrency and shutdown state are shared across
+all supplied connections. `serve_connection(connection, options, service)` is
+a one-connection convenience function; creating a fresh runtime per
+connection deliberately makes its concurrency limit local to that connection.
+
+The connection API takes ownership of the negotiated connection. It rejects a
+non-`iroh-http/2` ALPN before dispatch, closes owned connections when the
+runtime shuts down, and returns a typed `ConnectionServeResult`. It does not
+apply or report endpoint-global connection caps, endpoint statistics, or
+connection events; those require endpoint ownership and remain in the
+whole-endpoint accept loop.
+
 ### Request lifecycle inside `RequestService::call`
 
 ```
@@ -127,7 +155,7 @@ Duplex mode uses HTTP Upgrade semantics. The ALPN for duplex connections is `iro
 |-------|---------------|-------------|
 | Max header size | `NodeOptions::max_header_size` (default 64 KB) | `max_buf_size(limit.max(8192))` on hyper builder + post-parse byte-count check |
 | Max request body | `ServeOptions::max_request_body_bytes` | Byte counter in `pump_hyper_body_to_channel_limited` |
-| Max concurrent requests | `ServeOptions::max_concurrency` (default 1024) | Drain semaphore: one permit per in-flight bi-stream |
+| Max concurrent requests | `ServeOptions::max_concurrency` / `ConnectionServeOptions::max_concurrency` (default 1024) | Shared Tower `GlobalConcurrencyLimitLayer`: one permit per in-flight bi-stream |
 | Per-request timeout | `ServeOptions::request_timeout_ms` (default 60 s) | `TimeoutService` wrapping `RequestService` |
 | Max connections per peer | `ServeOptions::max_connections_per_peer` (default 8) | `PeerConnectionGuard` + `DashMap` counter |
 
