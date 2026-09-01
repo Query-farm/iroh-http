@@ -236,17 +236,28 @@ impl StreamAdmissionBarrier {
         self.stopped.load(Ordering::Acquire)
     }
 
-    fn try_admit(&self, requests: &AtomicUsize, deliveries: &AtomicUsize) -> bool {
+    fn try_admit(
+        &self,
+        requests: Arc<AtomicUsize>,
+        deliveries: Arc<AtomicUsize>,
+        drain_notify: Arc<tokio::sync::Notify>,
+    ) -> Option<(RequestTracker, DeliveryTracker)> {
         let _gate = self
             .gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.stopped.load(Ordering::Acquire) {
-            return false;
+            return None;
         }
         requests.fetch_add(1, Ordering::Relaxed);
         deliveries.fetch_add(1, Ordering::Relaxed);
-        true
+        // Construct the counter owners while still inside admission. The
+        // returned guards are captured by the request future before it can be
+        // spawned, so dropping an unpolled task cannot leak either counter.
+        Some((
+            RequestTracker::new(requests),
+            DeliveryTracker::new(deliveries, drain_notify),
+        ))
     }
 
     fn stop(&self) {
@@ -456,22 +467,24 @@ impl ConnectionServeRuntime {
                     break;
                 }
             };
-            let (send, recv) = match accepted {
+            let (send, recv, admission) = match accepted {
                 None => continue,
                 Some(Ok(stream)) => {
                     // Counter acquisition and shutdown's transition to drain
                     // share one short gate. The stream is therefore either
                     // visible to drain or rejected; it cannot land between
                     // the stop flag and drain's first zero observation.
-                    if !self
-                        .inner
-                        .stream_admission
-                        .try_admit(&self.inner.requests, &self.inner.deliveries)
-                    {
+                    let admission = self.inner.stream_admission.try_admit(
+                        Arc::clone(&self.inner.requests),
+                        Arc::clone(&self.inner.deliveries),
+                        Arc::clone(&self.inner.drain_notify),
+                    );
+                    let Some(admission) = admission else {
                         drop(stream);
                         continue;
-                    }
-                    stream
+                    };
+                    let (send, recv) = stream;
+                    (send, recv, admission)
                 }
                 Some(Err(_)) => break,
             };
@@ -482,16 +495,17 @@ impl ConnectionServeRuntime {
             // response on a pooled connection.
             let response_stopped = send.stopped();
             let io = TokioIo::new(IrohStream::new(send, recv));
-            let request_counter = Arc::clone(&self.inner.requests);
-            let delivery_counter = Arc::clone(&self.inner.deliveries);
-            let drain_notify = Arc::clone(&self.inner.drain_notify);
             let request_stack = stack.clone();
             let header_read_timeout = self.inner.options.request_timeout;
 
             requests.spawn(async move {
-                let _delivery = DeliveryTracker::new(delivery_counter, drain_notify);
+                // `admission` already owns both increments before this future
+                // is spawned. Even cancellation before the first poll drops
+                // these captured guards and releases the counters.
+                let (request, delivery) = admission;
+                let _delivery = delivery;
                 {
-                    let _request = RequestTracker::new(request_counter);
+                    let _request = request;
                     super::pipeline::serve_bistream(
                         io,
                         request_stack,
@@ -645,12 +659,14 @@ mod tests {
         let barrier = Arc::new(StreamAdmissionBarrier::new());
         let requests = Arc::new(AtomicUsize::new(0));
         let deliveries = Arc::new(AtomicUsize::new(0));
+        let drain_notify = Arc::new(tokio::sync::Notify::new());
         let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
 
         let late_barrier = Arc::clone(&barrier);
         let late_requests = Arc::clone(&requests);
         let late_deliveries = Arc::clone(&deliveries);
+        let late_drain_notify = Arc::clone(&drain_notify);
         let late = tokio::spawn(async move {
             // This is the old pre-increment observation that raced with
             // shutdown. Pause here so shutdown deterministically wins the
@@ -658,16 +674,52 @@ mod tests {
             assert!(!late_barrier.is_stopped());
             observed_tx.send(()).expect("signal early observation");
             resume_rx.await.expect("resume late stream");
-            late_barrier.try_admit(&late_requests, &late_deliveries)
+            late_barrier.try_admit(late_requests, late_deliveries, late_drain_notify)
         });
 
         observed_rx.await.expect("late stream reached race window");
         barrier.stop();
         resume_tx.send(()).expect("release late stream");
 
-        assert!(!late.await.expect("late admission task joined"));
+        assert!(late.await.expect("late admission task joined").is_none());
         assert_eq!(requests.load(Ordering::Acquire), 0);
         assert_eq!(deliveries.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_an_unpolled_admitted_future_releases_shutdown_counters() {
+        let barrier = StreamAdmissionBarrier::new();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let deliveries = Arc::new(AtomicUsize::new(0));
+        let drain_notify = Arc::new(tokio::sync::Notify::new());
+        let admission = barrier
+            .try_admit(
+                Arc::clone(&requests),
+                Arc::clone(&deliveries),
+                Arc::clone(&drain_notify),
+            )
+            .expect("stream admitted before shutdown");
+        let unpolled = async move {
+            let _admission = admission;
+            std::future::pending::<()>().await;
+        };
+
+        assert_eq!(requests.load(Ordering::Acquire), 1);
+        assert_eq!(deliveries.load(Ordering::Acquire), 1);
+        barrier.stop();
+        drop(unpolled);
+
+        assert_eq!(requests.load(Ordering::Acquire), 0);
+        assert_eq!(deliveries.load(Ordering::Acquire), 0);
+        assert!(
+            wait_for_zero_until(
+                &deliveries,
+                &drain_notify,
+                drain_deadline(Duration::from_secs(1)),
+            )
+            .await,
+            "shutdown drain observes the released unpolled admission",
+        );
     }
 
     #[test]
