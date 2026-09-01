@@ -35,8 +35,8 @@ use crate::{Body, ConnectionEvent, IrohEndpoint};
 
 use self::accept::{accept_loop, AcceptConfig};
 use self::options::{
-    DEFAULT_CONCURRENCY, DEFAULT_DRAIN_TIMEOUT_MS, DEFAULT_MAX_CONNECTIONS_PER_PEER,
-    DEFAULT_REQUEST_TIMEOUT_MS,
+    DEFAULT_CONCURRENCY, DEFAULT_CONNECTION_IDLE_TIMEOUT_MS, DEFAULT_DRAIN_TIMEOUT_MS,
+    DEFAULT_MAX_CONNECTIONS_PER_PEER, DEFAULT_MAX_TOTAL_CONNECTIONS, DEFAULT_REQUEST_TIMEOUT_MS,
 };
 
 // Re-exported from sub-modules so external paths
@@ -143,6 +143,17 @@ where
 {
     let cfg = AcceptConfig {
         connection: ConnectionServeOptions {
+            max_connections_per_peer: options
+                .max_connections_per_peer
+                .unwrap_or(DEFAULT_MAX_CONNECTIONS_PER_PEER),
+            max_total_connections: options
+                .max_total_connections
+                .unwrap_or(DEFAULT_MAX_TOTAL_CONNECTIONS),
+            connection_idle_timeout: Duration::from_millis(
+                options
+                    .connection_idle_timeout_ms
+                    .unwrap_or(DEFAULT_CONNECTION_IDLE_TIMEOUT_MS),
+            ),
             max_concurrency: options.max_concurrency.unwrap_or(DEFAULT_CONCURRENCY),
             // Preserve the endpoint API's established zero-means-disabled
             // convention while the connection API expresses that as `None`.
@@ -165,10 +176,6 @@ where
             compression: endpoint.compression().cloned(),
             decompression: options.decompression.unwrap_or(true),
         },
-        max_conns_per_peer: options
-            .max_connections_per_peer
-            .unwrap_or(DEFAULT_MAX_CONNECTIONS_PER_PEER),
-        max_total_connections: options.max_total_connections,
     };
 
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());

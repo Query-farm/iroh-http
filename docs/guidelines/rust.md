@@ -63,10 +63,11 @@ runtime.serve_connection(connection).await?;
 runtime.shutdown().await;
 ```
 
-The reusable runtime makes request concurrency and drain state global to the
-external router. The one-shot `serve_connection(connection, options, service)`
-helper is intentionally scoped to one connection. Neither connection-only API
-claims endpoint connection caps, endpoint statistics, or connection events.
+The reusable runtime makes total/per-peer connection admission, request
+concurrency, idle-stream timeouts, and drain state global to the external
+router. The one-shot `serve_connection(connection, options, service)` helper
+is intentionally scoped to one connection. Connection-only APIs do not update
+an `IrohEndpoint`'s public statistics or emit endpoint connection events.
 
 Every dispatched request contains both `RemoteEndpointId` and the compatible
 base32 `RemoteNodeId`. Identity bridges must take raw bytes from

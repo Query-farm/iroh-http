@@ -16,6 +16,9 @@ pub struct ServeOptions {
     pub max_concurrency: Option<usize>,
     /// Per-request timeout in milliseconds.  Default: 60 000.
     pub request_timeout_ms: Option<u64>,
+    /// Maximum time an otherwise-idle accepted HTTP connection may wait for
+    /// its next bidirectional request stream. Default: 60 000 milliseconds.
+    pub connection_idle_timeout_ms: Option<u64>,
     /// Maximum connections from a single peer.  Default: 8.
     pub max_connections_per_peer: Option<usize>,
     /// Reject request bodies larger than this many **wire** bytes (compressed).
@@ -27,7 +30,7 @@ pub struct ServeOptions {
     pub max_request_body_decoded_bytes: Option<usize>,
     /// Graceful shutdown drain window in milliseconds.  Default: 30 000.
     pub drain_timeout_ms: Option<u64>,
-    /// Maximum total QUIC connections the server will accept.  Default: unlimited.
+    /// Maximum total QUIC connections the server will accept. Default: 1024.
     pub max_total_connections: Option<usize>,
     /// When `true` (the default), reject new requests immediately with `503
     /// Service Unavailable` when `max_concurrency` is already reached rather
@@ -42,7 +45,9 @@ pub struct ServeOptions {
 
 pub(crate) const DEFAULT_CONCURRENCY: usize = 1024;
 pub(crate) const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
+pub(crate) const DEFAULT_CONNECTION_IDLE_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_PEER: usize = 8;
+pub(crate) const DEFAULT_MAX_TOTAL_CONNECTIONS: usize = 1024;
 pub(crate) const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 30_000;
 /// 16 MiB — applied when `max_request_body_wire_bytes` or
 /// `max_request_body_decoded_bytes` is not explicitly set.

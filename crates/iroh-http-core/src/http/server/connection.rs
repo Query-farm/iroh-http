@@ -2,9 +2,8 @@
 //!
 //! [`ConnectionServeRuntime`] owns the state that must be shared when an
 //! external Iroh router dispatches more than one HTTP connection: request
-//! concurrency, request/delivery tracking, and graceful shutdown. Endpoint
-//! connection caps, endpoint statistics, and connection events deliberately
-//! remain in the whole-endpoint accept loop.
+//! concurrency, connection admission, request/delivery tracking, and graceful
+//! shutdown.
 
 use std::{
     convert::Infallible,
@@ -20,7 +19,9 @@ use tower::{limit::GlobalConcurrencyLimitLayer, Service, ServiceBuilder, Service
 
 use crate::{base32_encode, http::transport::io::IrohStream, Body, ALPN};
 
-use super::lifecycle::{DeliveryTracker, RequestTracker};
+use super::lifecycle::{
+    ConnectionAdmission, ConnectionAdmissionError, DeliveryTracker, RequestTracker,
+};
 use super::pipeline::ServeService;
 use super::stack::{CompressionOptions, StackConfig};
 use super::{RemoteEndpointId, RemoteNodeId};
@@ -34,6 +35,13 @@ use super::{RemoteEndpointId, RemoteNodeId};
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ConnectionServeOptions {
+    /// Maximum simultaneous connections from one authenticated peer. Default: 8.
+    pub max_connections_per_peer: usize,
+    /// Maximum simultaneous connections across this runtime. Default: 1024.
+    pub max_total_connections: usize,
+    /// Maximum time an otherwise-idle connection may wait for its next
+    /// bidirectional request stream. Default: 60 seconds.
+    pub connection_idle_timeout: Duration,
     /// Maximum simultaneous requests across this runtime. Default: 1024.
     pub max_concurrency: usize,
     /// Per-request and request-head timeout. `None` disables both.
@@ -57,6 +65,11 @@ pub struct ConnectionServeOptions {
 impl Default for ConnectionServeOptions {
     fn default() -> Self {
         Self {
+            max_connections_per_peer: super::options::DEFAULT_MAX_CONNECTIONS_PER_PEER,
+            max_total_connections: super::options::DEFAULT_MAX_TOTAL_CONNECTIONS,
+            connection_idle_timeout: Duration::from_millis(
+                super::options::DEFAULT_CONNECTION_IDLE_TIMEOUT_MS,
+            ),
             max_concurrency: super::options::DEFAULT_CONCURRENCY,
             request_timeout: Some(Duration::from_millis(
                 super::options::DEFAULT_REQUEST_TIMEOUT_MS,
@@ -74,6 +87,24 @@ impl Default for ConnectionServeOptions {
 
 impl ConnectionServeOptions {
     fn validate(&self) -> Result<(), ConnectionServeError> {
+        if self.max_connections_per_peer == 0 {
+            return Err(ConnectionServeError::InvalidOptions {
+                option: "max_connections_per_peer",
+                reason: "must be greater than zero",
+            });
+        }
+        if self.max_total_connections == 0 {
+            return Err(ConnectionServeError::InvalidOptions {
+                option: "max_total_connections",
+                reason: "must be greater than zero",
+            });
+        }
+        if self.connection_idle_timeout.is_zero() {
+            return Err(ConnectionServeError::InvalidOptions {
+                option: "connection_idle_timeout",
+                reason: "must be greater than zero",
+            });
+        }
         if self.max_concurrency == 0 {
             return Err(ConnectionServeError::InvalidOptions {
                 option: "max_concurrency",
@@ -96,6 +127,9 @@ impl ConnectionServeOptions {
 pub enum ConnectionServeEnd {
     /// The peer closed the connection or QUIC stopped yielding streams.
     PeerClosed,
+    /// No request was in flight and the peer opened no new stream before the
+    /// configured connection idle timeout.
+    IdleTimeout,
     /// The owning runtime was shut down.
     Shutdown,
 }
@@ -133,12 +167,25 @@ pub enum ConnectionServeError {
         /// Raw negotiated ALPN bytes, which need not be UTF-8.
         actual: Vec<u8>,
     },
+    #[error("total connection limit reached ({maximum})")]
+    /// The shared runtime reached its total connection bound.
+    TotalConnectionLimitReached {
+        /// Configured total connection maximum.
+        maximum: usize,
+    },
+    #[error("per-peer connection limit reached ({maximum})")]
+    /// The authenticated peer reached its per-peer connection bound.
+    PeerConnectionLimitReached {
+        /// Configured maximum for the rejected scope.
+        maximum: usize,
+    },
 }
 
 struct ConnectionServeInner {
     options: ConnectionServeOptions,
     service: Mutex<ServeService>,
     concurrency: GlobalConcurrencyLimitLayer,
+    admission: Arc<ConnectionAdmission>,
     requests: Arc<AtomicUsize>,
     deliveries: Arc<AtomicUsize>,
     drain_notify: Arc<tokio::sync::Notify>,
@@ -185,6 +232,8 @@ impl ConnectionServeRuntime {
             options,
             service,
             Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            None,
             Arc::new(AtomicBool::new(false)),
             Arc::new(tokio::sync::Notify::new()),
         )
@@ -194,6 +243,8 @@ impl ConnectionServeRuntime {
         options: ConnectionServeOptions,
         service: S,
         requests: Arc<AtomicUsize>,
+        connections: Arc<AtomicUsize>,
+        on_connection_event: Option<super::ConnectionEventFn>,
         close_flag: Arc<AtomicBool>,
         close_connections: Arc<tokio::sync::Notify>,
     ) -> Result<Self, ConnectionServeError>
@@ -207,11 +258,18 @@ impl ConnectionServeRuntime {
     {
         options.validate()?;
         let max_concurrency = options.max_concurrency;
+        let admission = ConnectionAdmission::new(
+            options.max_connections_per_peer,
+            options.max_total_connections,
+            connections,
+            on_connection_event,
+        );
         Ok(Self {
             inner: Arc::new(ConnectionServeInner {
                 options,
                 service: Mutex::new(service.boxed_clone()),
                 concurrency: GlobalConcurrencyLimitLayer::new(max_concurrency),
+                admission,
                 requests,
                 deliveries: Arc::new(AtomicUsize::new(0)),
                 drain_notify: Arc::new(tokio::sync::Notify::new()),
@@ -232,20 +290,41 @@ impl ConnectionServeRuntime {
     /// ID into every request, and closes it when the runtime shuts down. A
     /// malformed HTTP stream is isolated from later streams on the same
     /// connection. Cancelling this future aborts its local request tasks; call
-    /// [`Self::shutdown`] for graceful global teardown.
+    /// [`Self::shutdown`] for graceful global teardown. The connection is
+    /// rejected when either shared connection limit is already full, and an
+    /// otherwise-idle connection is closed after `connection_idle_timeout`.
     pub async fn serve_connection(
         &self,
         connection: iroh::endpoint::Connection,
     ) -> Result<ConnectionServeResult, ConnectionServeError> {
         let identity = validate_http_connection(&connection)?;
-        Ok(self.serve_validated(connection, identity).await)
+        self.serve_validated(connection, identity).await
     }
 
     pub(super) async fn serve_validated(
         &self,
         connection: iroh::endpoint::Connection,
         identity: ValidatedRemoteIdentity,
-    ) -> ConnectionServeResult {
+    ) -> Result<ConnectionServeResult, ConnectionServeError> {
+        let _connection = match self
+            .inner
+            .admission
+            .acquire(identity.endpoint_id, identity.legacy_node_id.clone())
+        {
+            Ok(connection) => connection,
+            Err(ConnectionAdmissionError::Total) => {
+                connection.close(0u32.into(), b"server at capacity");
+                return Err(ConnectionServeError::TotalConnectionLimitReached {
+                    maximum: self.inner.options.max_total_connections,
+                });
+            }
+            Err(ConnectionAdmissionError::Peer) => {
+                connection.close(0u32.into(), b"too many peer connections");
+                return Err(ConnectionServeError::PeerConnectionLimitReached {
+                    maximum: self.inner.options.max_connections_per_peer,
+                });
+            }
+        };
         let service = self
             .inner
             .service
@@ -282,6 +361,7 @@ impl ConnectionServeRuntime {
         };
         let mut requests = tokio::task::JoinSet::new();
 
+        let mut end = ConnectionServeEnd::PeerClosed;
         loop {
             // Register before loading `close_flag`: `notify_waiters` stores no
             // permit, so registering later would leave a lost-wakeup window.
@@ -298,6 +378,8 @@ impl ConnectionServeRuntime {
                 continue;
             }
 
+            let idle = tokio::time::sleep(self.inner.options.connection_idle_timeout);
+            tokio::pin!(idle);
             let accepted = tokio::select! {
                 biased;
                 _ = &mut close => None,
@@ -306,6 +388,11 @@ impl ConnectionServeRuntime {
                     continue;
                 }
                 stream = connection.accept_bi() => Some(stream),
+                _ = &mut idle, if requests.is_empty() => {
+                    end = ConnectionServeEnd::IdleTimeout;
+                    connection.close(0u32.into(), b"HTTP connection idle timeout");
+                    break;
+                }
             };
             let (send, recv) = match accepted {
                 None => continue,
@@ -364,35 +451,40 @@ impl ConnectionServeRuntime {
         }
 
         let shutdown = self.inner.close_flag.load(Ordering::Acquire);
-        ConnectionServeResult {
+        Ok(ConnectionServeResult {
             end: if shutdown {
                 ConnectionServeEnd::Shutdown
             } else {
-                ConnectionServeEnd::PeerClosed
+                end
             },
             drained: !shutdown || self.inner.drained.load(Ordering::Acquire),
-        }
+        })
     }
 
     /// Stop accepting new streams across every runtime clone, wait for
     /// response delivery up to `drain_timeout`, then close the connections.
-    /// Returns `true` when all tracked deliveries drained before the deadline.
+    /// Returns `true` when tracked deliveries drained and every admitted
+    /// connection handler exited before the shared deadline.
     pub async fn shutdown(&self) -> bool {
         *self
             .inner
             .shutdown
             .get_or_init(|| async {
                 self.inner.no_new_streams.store(true, Ordering::Release);
-                let drained = wait_for_drain(
-                    &self.inner.deliveries,
-                    &self.inner.drain_notify,
-                    self.inner.options.drain_timeout,
-                )
-                .await;
+                let deadline = drain_deadline(self.inner.options.drain_timeout);
+                let drained =
+                    wait_for_zero_until(&self.inner.deliveries, &self.inner.drain_notify, deadline)
+                        .await;
                 self.inner.drained.store(drained, Ordering::Release);
                 self.inner.close_flag.store(true, Ordering::Release);
                 self.inner.close_connections.notify_waiters();
-                drained
+                let connections_closed = wait_for_zero_until(
+                    self.inner.admission.total(),
+                    self.inner.admission.released(),
+                    deadline,
+                )
+                .await;
+                drained && connections_closed
             })
             .await
     }
@@ -442,15 +534,17 @@ pub(super) fn validate_http_connection(
     })
 }
 
-async fn wait_for_drain(
+fn drain_deadline(timeout: Duration) -> tokio::time::Instant {
+    tokio::time::Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400))
+}
+
+async fn wait_for_zero_until(
     in_flight: &AtomicUsize,
     notify: &tokio::sync::Notify,
-    timeout: Duration,
+    deadline: tokio::time::Instant,
 ) -> bool {
-    #[allow(clippy::arithmetic_side_effects)]
-    let deadline = tokio::time::Instant::now()
-        .checked_add(timeout)
-        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
     loop {
         // Register before inspecting the count for the same lost-wakeup
         // reason as the connection close waiter above.
@@ -496,6 +590,44 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn options_reject_unbounded_connection_configuration() {
+        for (option, options) in [
+            (
+                "max_connections_per_peer",
+                ConnectionServeOptions {
+                    max_connections_per_peer: 0,
+                    ..ConnectionServeOptions::default()
+                },
+            ),
+            (
+                "max_total_connections",
+                ConnectionServeOptions {
+                    max_total_connections: 0,
+                    ..ConnectionServeOptions::default()
+                },
+            ),
+            (
+                "connection_idle_timeout",
+                ConnectionServeOptions {
+                    connection_idle_timeout: Duration::ZERO,
+                    ..ConnectionServeOptions::default()
+                },
+            ),
+        ] {
+            let error = options
+                .validate()
+                .expect_err("unsafe connection option must be rejected");
+            assert!(matches!(
+                error,
+                ConnectionServeError::InvalidOptions {
+                    option: rejected,
+                    ..
+                } if rejected == option
+            ));
+        }
     }
 
     #[test]

@@ -19,77 +19,121 @@ use super::ConnectionEventFn;
 
 // ── ConnectionTracker ─────────────────────────────────────────────────────────
 
-/// Per-connection lifecycle: enforces the per-peer cap, increments the
-/// total-connection counter, and fires connect/disconnect events on the
-/// 0→1 / 1→0 per-peer transitions. Drop releases all three.
-pub(crate) struct ConnectionTracker {
-    counts: Arc<Mutex<HashMap<iroh::PublicKey, usize>>>,
-    peer: iroh::PublicKey,
-    peer_id_str: String,
-    on_event: Option<ConnectionEventFn>,
-    total: Arc<AtomicUsize>,
+/// Which shared connection-admission bound rejected a connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConnectionAdmissionError {
+    Total,
+    Peer,
 }
 
-impl ConnectionTracker {
-    /// Try to register a new connection from `peer`. Returns `None` when
-    /// the peer is already at `max_per_peer` connections — the caller
-    /// must reject the new connection. On success `total` is incremented
-    /// and the connect event (if any) has fired.
+/// Runtime-wide connection admission shared by every router handler clone.
+pub(crate) struct ConnectionAdmission {
+    counts: Mutex<HashMap<iroh::PublicKey, usize>>,
+    total: Arc<AtomicUsize>,
+    max_per_peer: usize,
+    max_total: usize,
+    on_event: Option<ConnectionEventFn>,
+    released: Arc<tokio::sync::Notify>,
+}
+
+impl ConnectionAdmission {
+    pub(crate) fn new(
+        max_per_peer: usize,
+        max_total: usize,
+        total: Arc<AtomicUsize>,
+        on_event: Option<ConnectionEventFn>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            counts: Mutex::new(HashMap::new()),
+            total,
+            max_per_peer,
+            max_total,
+            on_event,
+            released: Arc::new(tokio::sync::Notify::new()),
+        })
+    }
+
     pub(crate) fn acquire(
-        counts: &Arc<Mutex<HashMap<iroh::PublicKey, usize>>>,
+        self: &Arc<Self>,
         peer: iroh::PublicKey,
         peer_id_str: String,
-        max_per_peer: usize,
-        on_event: Option<ConnectionEventFn>,
-        total: Arc<AtomicUsize>,
-    ) -> Option<Self> {
-        let mut map = counts.lock().unwrap_or_else(|e| e.into_inner());
-        let count = map.entry(peer).or_insert(0);
-        if *count >= max_per_peer {
-            return None;
+    ) -> Result<ConnectionTracker, ConnectionAdmissionError> {
+        // One lock covers both limits, so concurrent connections from
+        // different peers cannot race through the total-cap check.
+        let mut counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.total.load(Ordering::Relaxed) >= self.max_total {
+            return Err(ConnectionAdmissionError::Total);
+        }
+        let count = counts.entry(peer).or_insert(0);
+        if *count >= self.max_per_peer {
+            return Err(ConnectionAdmissionError::Peer);
         }
         let was_zero = *count == 0;
         *count = count.saturating_add(1);
-        drop(map);
+        self.total.fetch_add(1, Ordering::Relaxed);
+        drop(counts);
 
-        total.fetch_add(1, Ordering::Relaxed);
-
-        // Fire connected event on 0 → 1 transition.
         if was_zero {
-            if let Some(cb) = &on_event {
-                cb(ConnectionEvent {
+            if let Some(callback) = &self.on_event {
+                callback(ConnectionEvent {
                     peer_id: peer_id_str.clone(),
                     connected: true,
                 });
             }
         }
 
-        Some(ConnectionTracker {
-            counts: counts.clone(),
+        Ok(ConnectionTracker {
+            admission: Arc::clone(self),
             peer,
             peer_id_str,
-            on_event,
-            total,
         })
     }
+
+    pub(crate) fn total(&self) -> &AtomicUsize {
+        &self.total
+    }
+
+    pub(crate) fn released(&self) -> &tokio::sync::Notify {
+        &self.released
+    }
+}
+
+/// Per-connection lifecycle. Drop releases the runtime-wide total/per-peer
+/// admission slot and fires disconnect on the final connection from a peer.
+pub(crate) struct ConnectionTracker {
+    admission: Arc<ConnectionAdmission>,
+    peer: iroh::PublicKey,
+    peer_id_str: String,
 }
 
 impl Drop for ConnectionTracker {
     fn drop(&mut self) {
-        self.total.fetch_sub(1, Ordering::Relaxed);
-
-        let mut map = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .admission
+            .counts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut disconnected = false;
         if let Some(c) = map.get_mut(&self.peer) {
             *c = c.saturating_sub(1);
             if *c == 0 {
                 map.remove(&self.peer);
-                // Fire disconnected event on 1 → 0 transition.
-                if let Some(cb) = &self.on_event {
-                    cb(ConnectionEvent {
-                        peer_id: self.peer_id_str.clone(),
-                        connected: false,
-                    });
-                }
+                disconnected = true;
+            }
+        }
+        self.admission.total.fetch_sub(1, Ordering::Release);
+        drop(map);
+        self.admission.released.notify_waiters();
+
+        if disconnected {
+            if let Some(callback) = &self.admission.on_event {
+                callback(ConnectionEvent {
+                    peer_id: self.peer_id_str.clone(),
+                    connected: false,
+                });
             }
         }
     }
@@ -157,28 +201,34 @@ mod tests {
     #[test]
     fn connection_tracker_increments_and_decrements_total() {
         let total = Arc::new(AtomicUsize::new(0));
-        let counts = Arc::new(Mutex::new(HashMap::new()));
+        let admission = ConnectionAdmission::new(4, 8, total.clone(), None);
         let peer = dummy_peer();
         {
-            let _t =
-                ConnectionTracker::acquire(&counts, peer, "p".to_string(), 4, None, total.clone())
-                    .expect("acquire should succeed under cap");
+            let _tracker = admission
+                .acquire(peer, "p".to_string())
+                .expect("acquire should succeed under cap");
             assert_eq!(total.load(Ordering::Relaxed), 1);
         }
         assert_eq!(total.load(Ordering::Relaxed), 0);
-        assert!(counts.lock().unwrap().is_empty());
+        assert!(admission.counts.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn connection_tracker_enforces_per_peer_cap() {
+    fn connection_tracker_enforces_shared_total_and_per_peer_caps() {
         let total = Arc::new(AtomicUsize::new(0));
-        let counts = Arc::new(Mutex::new(HashMap::new()));
+        let admission = ConnectionAdmission::new(1, 2, total.clone(), None);
         let peer = dummy_peer();
-        let _a =
-            ConnectionTracker::acquire(&counts, peer, "p".into(), 1, None, total.clone()).unwrap();
-        let b = ConnectionTracker::acquire(&counts, peer, "p".into(), 1, None, total.clone());
-        assert!(b.is_none(), "second acquire over cap must fail");
-        assert_eq!(total.load(Ordering::Relaxed), 1);
+        let _first = admission.acquire(peer, "p".into()).unwrap();
+        assert!(matches!(
+            admission.acquire(peer, "p".into()),
+            Err(ConnectionAdmissionError::Peer),
+        ));
+        let _second = admission.acquire(dummy_peer(), "q".into()).unwrap();
+        assert!(matches!(
+            admission.acquire(dummy_peer(), "r".into()),
+            Err(ConnectionAdmissionError::Total),
+        ));
+        assert_eq!(total.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

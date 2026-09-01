@@ -5,27 +5,18 @@
 //! used by the public already-negotiated connection API owns its HTTP streams,
 //! request limits, identity injection, and drain behavior.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-};
+use std::sync::{atomic::AtomicBool, Arc};
 
 use tower::Service;
 
 use crate::{Body, IrohEndpoint};
 
 use super::connection::{validate_http_connection, ConnectionServeOptions, ConnectionServeRuntime};
-use super::lifecycle::ConnectionTracker;
 use super::ConnectionEventFn;
 
 /// Endpoint-only admission plus the shared per-connection HTTP configuration.
 pub(super) struct AcceptConfig {
     pub connection: ConnectionServeOptions,
-    pub max_conns_per_peer: usize,
-    pub max_total_connections: Option<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -49,7 +40,6 @@ pub(super) async fn accept_loop<S>(
         + 'static,
     S::Future: Send + 'static,
 {
-    let peer_counts = Arc::new(Mutex::new(HashMap::new()));
     let total_connections = endpoint.active_connections_arc();
     let total_requests = endpoint.active_requests_arc();
     let endpoint_closed_tx = endpoint.connection_closed_tx();
@@ -58,6 +48,8 @@ pub(super) async fn accept_loop<S>(
         cfg.connection,
         service,
         total_requests,
+        total_connections,
+        on_connection_event,
         close_flag,
         close_connections,
     ) {
@@ -104,39 +96,14 @@ pub(super) async fn accept_loop<S>(
             }
         };
 
-        if let Some(max_total) = cfg.max_total_connections {
-            let current = total_connections.load(Ordering::Relaxed);
-            if current >= max_total {
-                tracing::warn!("iroh-http: total connection limit reached ({current}/{max_total})");
-                connection.close(0u32.into(), b"server at capacity");
-                continue;
-            }
-        }
-
-        let remote_key = identity.endpoint_id;
-        let remote_id = identity.legacy_node_id.clone();
-        let tracker = match ConnectionTracker::acquire(
-            &peer_counts,
-            remote_key,
-            remote_id.clone(),
-            cfg.max_conns_per_peer,
-            on_connection_event.clone(),
-            Arc::clone(&total_connections),
-        ) {
-            Some(tracker) => tracker,
-            None => {
-                tracing::warn!("iroh-http: peer {remote_id} exceeded connection limit");
-                connection.close(0u32.into(), b"too many connections");
-                continue;
-            }
-        };
-
         let connection_runtime = runtime.clone();
         tokio::spawn(async move {
-            let _tracker = tracker;
-            let _ = connection_runtime
+            if let Err(error) = connection_runtime
                 .serve_validated(connection, identity)
-                .await;
+                .await
+            {
+                tracing::debug!(%error, "iroh-http: connection rejected");
+            }
         });
     }
 

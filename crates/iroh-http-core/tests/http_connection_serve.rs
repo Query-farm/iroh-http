@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use iroh_http_core::{
     fetch_request, Body, ConnectionServeEnd, ConnectionServeError, ConnectionServeOptions,
     ConnectionServeRuntime, IrohEndpoint, NetworkingOptions, NodeOptions, RemoteEndpointId,
-    RemoteNodeId, StackConfig, ALPN_DUPLEX,
+    RemoteNodeId, StackConfig, ALPN, ALPN_DUPLEX,
 };
 
 fn server_addr(endpoint: &iroh_http_core::IrohEndpoint) -> iroh::EndpointAddr {
@@ -143,6 +143,119 @@ async fn negotiated_connection_rejects_protocol_confusion() {
     tokio::time::timeout(Duration::from_secs(5), connection.closed())
         .await
         .expect("rejected connection closed promptly");
+}
+
+#[tokio::test]
+async fn reusable_runtime_closes_idle_connections() {
+    let (server_endpoint, client_endpoint) = common::make_pair().await;
+    let mut options = ConnectionServeOptions::default();
+    options.connection_idle_timeout = Duration::from_millis(50);
+    let runtime = ConnectionServeRuntime::new(
+        options,
+        tower::service_fn(|_request: hyper::Request<Body>| async {
+            Ok::<_, Infallible>(hyper::Response::new(Body::empty()))
+        }),
+    )
+    .expect("valid runtime");
+    let raw_server = server_endpoint.raw().clone();
+    let server = tokio::spawn(async move {
+        let incoming = raw_server.accept().await.expect("incoming connection");
+        let connection = incoming.await.expect("completed handshake");
+        runtime.serve_connection(connection).await
+    });
+
+    let connection = client_endpoint
+        .raw()
+        .connect(server_addr(&server_endpoint), ALPN)
+        .await
+        .expect("HTTP ALPN negotiates");
+    let result = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("idle connection server stopped")
+        .expect("connection task joined")
+        .expect("connection serve succeeded");
+    assert_eq!(result.end, ConnectionServeEnd::IdleTimeout);
+    tokio::time::timeout(Duration::from_secs(5), connection.closed())
+        .await
+        .expect("idle connection closed promptly");
+}
+
+#[tokio::test]
+async fn reusable_runtime_shares_total_connection_admission() {
+    let (server_endpoint, first_client) = common::make_pair().await;
+    let second_client = loopback_endpoint().await;
+    let mut options = ConnectionServeOptions::default();
+    options.max_total_connections = 1;
+    let runtime = ConnectionServeRuntime::new(
+        options,
+        tower::service_fn(|_request: hyper::Request<Body>| async {
+            Ok::<_, Infallible>(hyper::Response::new(Body::empty()))
+        }),
+    )
+    .expect("valid runtime");
+
+    let raw_server = server_endpoint.raw().clone();
+    let server_runtime = runtime.clone();
+    let server = tokio::spawn(async move {
+        let first = raw_server.accept().await.expect("first incoming");
+        let first = first.await.expect("first handshake");
+        let runtime = server_runtime.clone();
+        let first = tokio::spawn(async move { runtime.serve_connection(first).await });
+
+        let second = raw_server.accept().await.expect("second incoming");
+        let second = second.await.expect("second handshake");
+        let rejected = server_runtime.serve_connection(second).await;
+        (first, rejected)
+    });
+
+    let address = server_addr(&server_endpoint);
+    let first_response = fetch_request(
+        &first_client,
+        &address,
+        hyper::Request::builder()
+            .uri("/")
+            .body(Body::empty())
+            .expect("first request"),
+        &StackConfig::default(),
+    )
+    .await
+    .expect("first admitted request");
+    first_response
+        .into_body()
+        .collect()
+        .await
+        .expect("first response body");
+    let rejected_fetch = tokio::spawn(async move {
+        fetch_request(
+            &second_client,
+            &address,
+            hyper::Request::builder()
+                .uri("/")
+                .body(Body::empty())
+                .expect("second request"),
+            &StackConfig::default(),
+        )
+        .await
+    });
+    let (first_task, rejected) = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("second admission resolved")
+        .expect("server task joined");
+    assert!(matches!(
+        rejected,
+        Err(ConnectionServeError::TotalConnectionLimitReached { maximum: 1 })
+    ));
+    let rejected_fetch = tokio::time::timeout(Duration::from_secs(5), rejected_fetch)
+        .await
+        .expect("rejected client request stopped")
+        .expect("rejected client task joined");
+    assert!(rejected_fetch.is_err());
+
+    assert!(runtime.shutdown().await);
+    first_task
+        .await
+        .expect("first connection task joined")
+        .expect("first connection served");
 }
 
 #[tokio::test]
