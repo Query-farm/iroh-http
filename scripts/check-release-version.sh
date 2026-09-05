@@ -15,6 +15,7 @@ fi
 
 VERSION="${TAG#v}"
 MAJOR_MINOR="$(printf '%s' "$VERSION" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
+CORE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/crates/iroh-http-core/Cargo.toml" | head -1)"
 ERRORS=0
 
 fail() {
@@ -72,8 +73,12 @@ PATH_DEP_MANIFESTS=(
 
 for manifest in "${PATH_DEP_MANIFESTS[@]}"; do
   while IFS= read -r line; do
-    if [[ "$line" != *"version = \"$VERSION\""* ]]; then
-      fail "$manifest has an internal path dependency not pinned to $VERSION: $line"
+    dependency_version="$VERSION"
+    if [[ "$line" == iroh-http-core* ]]; then
+      dependency_version="$CORE_VERSION"
+    fi
+    if [[ "$line" != *"version = \"$dependency_version\""* ]]; then
+      fail "$manifest has an internal path dependency not pinned to $dependency_version: $line"
     fi
   done < <(grep 'iroh-http.*path *= *"' "$ROOT/$manifest" || true)
 done

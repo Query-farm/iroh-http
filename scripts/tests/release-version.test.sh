@@ -33,6 +33,7 @@ new_fixture() {
   local fixture
   fixture="$(mktemp -d)"
   mkdir -p "$fixture/crates/iroh-http-adapter" \
+    "$fixture/crates/iroh-http-core" \
     "$fixture/crates/iroh-http-discovery" \
     "$fixture/packages/iroh-http-deno/src" \
     "$fixture/packages/iroh-http-node/npm" \
@@ -41,6 +42,7 @@ new_fixture() {
 
   cp "$ROOT/Cargo.toml" "$fixture/Cargo.toml"
   cp "$ROOT/crates/iroh-http-adapter/Cargo.toml" "$fixture/crates/iroh-http-adapter/Cargo.toml"
+  cp "$ROOT/crates/iroh-http-core/Cargo.toml" "$fixture/crates/iroh-http-core/Cargo.toml"
   cp "$ROOT/crates/iroh-http-discovery/Cargo.toml" "$fixture/crates/iroh-http-discovery/Cargo.toml"
   cp "$ROOT/packages/iroh-http-deno/Cargo.toml" "$fixture/packages/iroh-http-deno/Cargo.toml"
   cp "$ROOT/packages/iroh-http-deno/deno.jsonc" "$fixture/packages/iroh-http-deno/deno.jsonc"
