@@ -2,7 +2,7 @@
 //! Throughput and latency benchmarks for iroh-http-core.
 //!
 //! Run:
-//!   cargo bench -p iroh-http-core
+//!   cargo bench -p query-farm-iroh-http-core
 //!
 //! Each benchmark uses loopback QUIC (relay disabled, 127.0.0.1:0) so results
 //! reflect the iroh-http stack rather than external network conditions.

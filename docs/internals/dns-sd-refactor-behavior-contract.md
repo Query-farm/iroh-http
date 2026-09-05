@@ -176,7 +176,7 @@ Rust peer projection.
 
 | Gate | Command/location | What it proves |
 | --- | --- | --- |
-| Rust unit/integration | `cargo test --workspace`; specifically `cargo test -p iroh-http-core` and `cargo test -p iroh-http-discovery` | DNS-SD parsing/policy, source-scoped union and retirement, peer projection, desktop session termination, address selection and refresh. |
+| Rust unit/integration | `cargo test --workspace`; specifically `cargo test -p query-farm-iroh-http-core` and `cargo test -p iroh-http-discovery` | DNS-SD parsing/policy, source-scoped union and retirement, peer projection, desktop session termination, address selection and refresh. |
 | Tauri Rust | `cargo test --manifest-path packages/iroh-http-tauri/Cargo.toml` | Owner generations, endpoint isolation, handle non-reuse, terminal batches, mobile projection/retirement, and Rust/native command-name parity (`tests::ffi_contract`). |
 | Shared JS lifecycle | `npm test --workspace=packages/iroh-http-shared` | One-start iterator behavior; abort, return, failure, cleanup, and peer/generic sharing. |
 | Cross-runtime public shape | [`tests/suites/discovery.mjs`](../../tests/suites/discovery.mjs) through Node, Deno, and Tauri runners | Public methods return the expected promise/iterable shapes, abort settles, and `asIrohPeer` compatibility remains. This suite deliberately does not prove multicast behavior. |

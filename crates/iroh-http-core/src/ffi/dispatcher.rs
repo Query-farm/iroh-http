@@ -26,8 +26,7 @@ use tower::Service;
 use crate::ffi::handles::ResponseHeadEntry;
 use crate::ffi::pumps::pump_hyper_body_to_channel;
 use crate::http::server::{
-    options::DEFAULT_MAX_REQUEST_BODY_BYTES, serve_with_events, ConnectionEventFn, RemoteNodeId,
-    ServeHandle, ServeOptions,
+    serve_with_events, ConnectionEventFn, RemoteNodeId, ServeHandle, ServeOptions,
 };
 use crate::{Body, CoreError, IrohEndpoint, RequestPayload};
 
@@ -313,7 +312,7 @@ impl FfiDispatcher {
 
         // ── Await response head from JS ──────────────────────────────────────
         let response_head = match head_rx.await {
-            Ok(h) => h,
+            Ok(head) => head,
             Err(_) => return internal_error(b"JS handler dropped without responding"),
         };
 
@@ -369,9 +368,7 @@ where
         } else {
             Some(max_header_size)
         },
-        max_request_body_wire_bytes: options
-            .max_request_body_wire_bytes
-            .or(Some(DEFAULT_MAX_REQUEST_BODY_BYTES)),
+        max_request_body_wire_bytes: options.max_request_body_wire_bytes,
     });
     let svc = IrohHttpService { dispatcher };
 

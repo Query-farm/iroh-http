@@ -10,7 +10,7 @@
 
 use iroh_http_core::{
     respond, CoreError, ErrorCode, HandleStore, RequestPayload, ResponseHeadEntry,
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_RESPONSE_BODY_BYTES,
+    DEFAULT_MAX_RESPONSE_BODY_BYTES,
 };
 
 /// Maximum number of header rows accepted at an adapter boundary.
@@ -19,10 +19,13 @@ pub const MAX_HEADER_COUNT: usize = 100;
 pub const MAX_HEADER_NAME_LEN: usize = 256;
 /// Maximum header value length in bytes accepted at an adapter boundary.
 pub const MAX_HEADER_VALUE_LEN: usize = 8_192;
-/// Maximum adapter-level timeout in milliseconds.
+/// Maximum client fetch timeout accepted at an adapter boundary (5 minutes).
 pub const MAX_TIMEOUT_MS: u64 = 300_000;
-/// Maximum adapter-level request body cap in bytes.
-pub const MAX_BODY_BYTES: usize = DEFAULT_MAX_REQUEST_BODY_BYTES;
+/// Maximum explicitly configured server timeout (24 hours).
+pub const MAX_SERVE_TIMEOUT_MS: u64 = 86_400_000;
+/// Maximum adapter-level request body cap in bytes. This bounds numeric input
+/// accepted across JavaScript FFI; omitting the option leaves bodies unlimited.
+pub const MAX_BODY_BYTES: usize = DEFAULT_MAX_RESPONSE_BODY_BYTES;
 /// Maximum adapter-level response body cap in bytes.
 pub const MAX_RESPONSE_BODY_BYTES: usize = DEFAULT_MAX_RESPONSE_BODY_BYTES;
 /// Maximum total simultaneous connections a served endpoint will accept.
@@ -505,6 +508,8 @@ pub fn coerce_endpoint_options(
 #[derive(Debug, Clone, Default)]
 pub struct RawServeOptions {
     pub request_timeout_ms: Option<f64>,
+    pub request_head_timeout_ms: Option<f64>,
+    pub body_idle_timeout_ms: Option<f64>,
     pub max_request_body_wire_bytes: Option<f64>,
     pub max_request_body_decoded_bytes: Option<f64>,
     pub max_total_connections: Option<f64>,
@@ -516,6 +521,8 @@ pub struct RawServeOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ServeOptions {
     pub request_timeout_ms: Option<u64>,
+    pub request_head_timeout_ms: Option<u64>,
+    pub body_idle_timeout_ms: Option<u64>,
     pub max_request_body_wire_bytes: Option<usize>,
     pub max_request_body_decoded_bytes: Option<usize>,
     pub max_total_connections: Option<usize>,
@@ -524,13 +531,21 @@ pub struct ServeOptions {
 
 /// Validate and coerce the serve numeric knobs behind a single seam.
 ///
-/// Field order matches the Node reference implementation: request timeout,
-/// max request body wire bytes, max request body decoded bytes, max total
-/// connections, drain timeout.
+/// Field order matches the Node reference implementation: application,
+/// request-head, and body-idle timeouts; wire and decoded body caps; total
+/// connections; and drain timeout.
 pub fn coerce_serve_options(raw: RawServeOptions) -> Result<ServeOptions, AdapterInputError> {
     let request_timeout_ms = raw
         .request_timeout_ms
-        .map(|v| safe_f64_to_u64(v, "requestTimeout", MAX_TIMEOUT_MS))
+        .map(|v| safe_f64_to_u64(v, "requestTimeout", MAX_SERVE_TIMEOUT_MS))
+        .transpose()?;
+    let request_head_timeout_ms = raw
+        .request_head_timeout_ms
+        .map(|v| safe_f64_to_u64(v, "requestHeadTimeout", MAX_SERVE_TIMEOUT_MS))
+        .transpose()?;
+    let body_idle_timeout_ms = raw
+        .body_idle_timeout_ms
+        .map(|v| safe_f64_to_u64(v, "bodyIdleTimeout", MAX_SERVE_TIMEOUT_MS))
         .transpose()?;
     let max_request_body_wire_bytes = raw
         .max_request_body_wire_bytes
@@ -550,6 +565,8 @@ pub fn coerce_serve_options(raw: RawServeOptions) -> Result<ServeOptions, Adapte
         .transpose()?;
     Ok(ServeOptions {
         request_timeout_ms,
+        request_head_timeout_ms,
+        body_idle_timeout_ms,
         max_request_body_wire_bytes,
         max_request_body_decoded_bytes,
         max_total_connections,
@@ -1086,6 +1103,8 @@ mod tests {
     fn coerce_serve_options_validates_and_coerces() {
         let ok = coerce_serve_options(RawServeOptions {
             request_timeout_ms: Some(1000.0),
+            request_head_timeout_ms: Some(2000.0),
+            body_idle_timeout_ms: Some(3000.0),
             max_request_body_wire_bytes: Some(2048.0),
             max_request_body_decoded_bytes: Some(4096.0),
             max_total_connections: Some(1000.0),
@@ -1093,12 +1112,53 @@ mod tests {
         })
         .expect("valid serve options");
         assert_eq!(ok.request_timeout_ms, Some(1000));
+        assert_eq!(ok.request_head_timeout_ms, Some(2000));
+        assert_eq!(ok.body_idle_timeout_ms, Some(3000));
         assert_eq!(ok.max_total_connections, Some(1000));
 
         assert_eq!(
             coerce_serve_options(RawServeOptions::default()),
             Ok(ServeOptions::default())
         );
+
+        let long_running = coerce_serve_options(RawServeOptions {
+            request_timeout_ms: Some((MAX_TIMEOUT_MS + 1) as f64),
+            ..Default::default()
+        })
+        .expect("server execution timeout may exceed the client fetch ceiling");
+        assert_eq!(long_running.request_timeout_ms, Some(MAX_TIMEOUT_MS + 1));
+
+        for (field, raw) in [
+            (
+                "requestTimeout",
+                RawServeOptions {
+                    request_timeout_ms: Some((MAX_SERVE_TIMEOUT_MS + 1) as f64),
+                    ..Default::default()
+                },
+            ),
+            (
+                "requestHeadTimeout",
+                RawServeOptions {
+                    request_head_timeout_ms: Some((MAX_SERVE_TIMEOUT_MS + 1) as f64),
+                    ..Default::default()
+                },
+            ),
+            (
+                "bodyIdleTimeout",
+                RawServeOptions {
+                    body_idle_timeout_ms: Some((MAX_SERVE_TIMEOUT_MS + 1) as f64),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert!(matches!(
+                coerce_serve_options(raw),
+                Err(AdapterInputError::InvalidArgument {
+                    field: actual,
+                    ..
+                }) if actual == field
+            ));
+        }
 
         // Over-cap total connections is rejected.
         let bad = coerce_serve_options(RawServeOptions {

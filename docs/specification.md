@@ -249,15 +249,19 @@ interface ServeOptions {
   maxConcurrency?: number;
   /** Max QUIC connections from one peer. Default: 8. */
   maxConnectionsPerPeer?: number;
-  /** Per-request timeout in ms. Default: 60 000. 0 = disabled. */
+  /** Application execution timeout in ms. Disabled by default. */
   requestTimeout?: number;
+  /** Complete-request-head timeout in ms. Default: 15 000. */
+  requestHeadTimeout?: number;
+  /** Maximum no-progress body interval in ms. Default: 30 000. */
+  bodyIdleTimeout?: number;
   /** Reject bodies larger than this many wire (compressed) bytes.
-   *  Default: 16 777 216 (16 MiB). */
+   *  Unlimited by default. */
   maxRequestBodyWireBytes?: number;
   /** Reject bodies larger than this many decoded bytes (after decompression).
-   *  Default: 16 777 216 (16 MiB). */
+   *  Unlimited by default. */
   maxRequestBodyDecodedBytes?: number;
-  /** Max total QUIC connections. Unlimited by default. */
+  /** Max total QUIC connections. Default: 1024. */
   maxTotalConnections?: number;
   /** Drain timeout in ms after shutdown. Default: 30 000. */
   drainTimeout?: number;
@@ -847,9 +851,11 @@ Configured via `NodeOptions` or `ServeOptions`. See [server-limits.md](features/
 
 | Option | Attack vector | HTTP status on limit |
 |---|---|---|
-| `maxConcurrency` | Request flood | 408 Request Timeout |
+| `maxConcurrency` | Request flood | 503 Service Unavailable when load shedding |
 | `maxConnectionsPerPeer` | Connection flood | Closed at QUIC level |
-| `requestTimeout` | Slow request | 408 Request Timeout |
+| `requestHeadTimeout` | Incomplete request head | Stream closed |
+| `bodyIdleTimeout` | Stalled streaming body | Body/stream closed |
+| `requestTimeout` | Explicit application execution deadline | 408 Request Timeout |
 | `maxRequestBodyWireBytes` | Oversized/compressed body | 413 Content Too Large |
 | `maxRequestBodyDecodedBytes` | Compression bomb | 413 Content Too Large |
 | `maxHeaderBytes` | Header flood | 431 Request Header Fields Too Large |

@@ -151,11 +151,13 @@ cannot distinguish a migrating connection from a dead one. Lower
 
 | Option | Default | Tune when |
 |--------|---------|-----------|
-| `requestTimeout` | 60 000 ms | Transfers large files (increase) or want fast failure detection (decrease) |
+| `requestTimeout` | disabled | Add an application execution deadline when required |
+| `requestHeadTimeout` | 15 000 ms | Increase only for exceptionally slow request-head delivery |
+| `bodyIdleTimeout` | 30 000 ms | Increase for links that legitimately pause during uploads |
 | `maxConcurrency` | 1 024 | Serving many concurrent requests (increase); or throttling (decrease) |
 | `maxConnectionsPerPeer` | 8 | IoT with few connections/peer (decrease); busy API clients (increase) |
-| `maxRequestBodyWireBytes` | 16 MiB | Cap body size on the wire (compressed) — lower to tighten bandwidth-flood protection, raise for large uploads |
-| `maxRequestBodyDecodedBytes` | 16 MiB | Cap body size after decompression — the primary compression-bomb guard; lower to tighten, raise for large decoded payloads |
+| `maxRequestBodyWireBytes` | unlimited | Add a coarse transport ceiling when the application does not own one |
+| `maxRequestBodyDecodedBytes` | unlimited | Set when core decompression is enabled and the application does not cap decoded input |
 | `drainTimeout` | 5 000 ms | Slow readers expected (increase); tight latency SLA (decrease) |
 
 ---

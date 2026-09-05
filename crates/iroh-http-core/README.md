@@ -1,28 +1,47 @@
-# iroh-http-core
+# query-farm-iroh-http-core
 
-Rust core for [iroh-http](https://github.com/momics/iroh-http). Runs HTTP/1.1 over [Iroh](https://iroh.computer) QUIC bidirectional streams via [hyper](https://hyper.rs). Nodes are addressed by Ed25519 public key.
+Query Farm's maintained packaging of `iroh-http-core`, based on Momics
+`iroh-http` 0.6.2.
+
+This package adds a reusable `ConnectionServeRuntime` for serving HTTP on Iroh
+connections that were accepted and ALPN-routed by an external router. It also
+provides typed authenticated endpoint identity, shared connection admission,
+streaming request-body idle protection, and graceful connection draining.
+
+It does not define a Query Farm or VGI wire protocol. Existing Rust source can
+retain the conventional crate name with a dependency alias:
+
+```toml
+iroh-http-core = { package = "query-farm-iroh-http-core", version = "0.6.3" }
+```
+
+The source repository preserves the upstream history and license. The
+connection-serving changes are intentionally general-purpose and suitable for
+upstreaming.
+
+Runs HTTP/1.1 over [Iroh](https://iroh.computer) QUIC bidirectional streams via
+[hyper](https://hyper.rs). Nodes are addressed by Ed25519 public key.
 
 This is the runtime-independent Rust API and transport engine. JavaScript
-application developers should normally use a higher-level adapter:
-> - **Node.js** → [`@momics/iroh-http-node`](https://www.npmjs.com/package/@momics/iroh-http-node)
-> - **Deno** → [`@momics/iroh-http-deno`](https://jsr.io/@momics/iroh-http-deno)
-> - **Tauri** → [`@momics/iroh-http-tauri`](https://www.npmjs.com/package/@momics/iroh-http-tauri)
+application developers should normally use the upstream higher-level adapters:
+
+- **Node.js** → [`@momics/iroh-http-node`](https://www.npmjs.com/package/@momics/iroh-http-node)
+- **Deno** → [`@momics/iroh-http-deno`](https://jsr.io/@momics/iroh-http-deno)
+- **Tauri** → [`@momics/iroh-http-tauri`](https://www.npmjs.com/package/@momics/iroh-http-tauri)
 
 ## Usage
 
 ```rust
 use std::convert::Infallible;
 
-use iroh_http_core::{Body, IrohEndpoint, NodeOptions, ServeOptions, serve};
+use iroh_http_core::{serve, Body, IrohEndpoint, NodeOptions, ServeOptions};
 use tower::service_fn;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Bind a local endpoint
     let endpoint = IrohEndpoint::bind(NodeOptions::default()).await?;
     println!("Node ID: {}", endpoint.node_id());
 
-    // Serve standard hyper requests through a standard tower Service.
     let handle = serve(
         endpoint.clone(),
         ServeOptions::default(),
@@ -32,24 +51,27 @@ async fn main() -> anyhow::Result<()> {
         }),
     );
 
-    // An application normally keeps the handle alive, then closes it during
-    // shutdown. `drain()` stops and awaits the serve task.
     handle.drain().await;
-
     Ok(())
 }
 ```
 
 ## Features
 
-- **Connection reuse**: QUIC connections to the same peer are pooled and multiplexed
-- **Streaming bodies**: request and response bodies stream through `mpsc` channels with configurable backpressure
+- **Externally routed connections**: serve an already-negotiated Iroh
+  connection after a shared router selects the ALPN
+- **Typed peer identity**: attach the authenticated `EndpointId` to requests
+- **Connection reuse**: pool and multiplex QUIC connections to the same peer
+- **Streaming bodies**: forward request and response bodies with backpressure
+- **Progress timeouts**: protect request heads and stalled bodies independently
+  of optional application execution deadlines
+- **Optional body ceilings**: configure coarse wire and decoded byte limits
+  without imposing a hidden default maximum
 - **Fetch cancellation**: abort in-flight requests via cancellation tokens
 - **Bidirectional streams**: full-duplex streaming via QUIC bidi streams
 - **Trailer support**: HTTP/1.1 chunked trailers for streaming metadata
-- **Configurable**: idle timeout, concurrency limits, channel capacity, chunk sizes
 - **Runtime-opt-in compression**: zstd request/response compression is compiled
-  in and enabled per node through `NodeOptions`; there is no Cargo feature gate
+  in and enabled per node through `NodeOptions`
 
 ## License
 

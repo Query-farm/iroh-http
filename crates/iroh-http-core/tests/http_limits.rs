@@ -602,10 +602,10 @@ async fn concurrent_requests_under_tight_concurrency() {
     );
 }
 
-/// When the wire limit is exceeded, the pump loop must drain the
-/// remaining body frames so the peer's QUIC send stream can close cleanly.
-/// The client write task should complete well within 500 ms of receiving the
-/// 413 response — not stall until the QUIC idle timeout (ISS-015).
+/// When the wire limit is exceeded, the body stream must terminate promptly so
+/// an application handler can return 413 and the peer's QUIC send stream can
+/// close cleanly. The client write task should complete well within 500 ms of
+/// receiving that response — not stall until the QUIC idle timeout (ISS-015).
 #[tokio::test]
 async fn body_overflow_drains_quic_stream() {
     let (server_ep, client_ep) = common::make_pair().await;
@@ -619,9 +619,18 @@ async fn body_overflow_drains_quic_stream() {
             max_request_body_wire_bytes: Some(100),
             ..Default::default()
         },
-        move |_payload: RequestPayload| {
-            // Handler does nothing: the serve path handles the 413 automatically
-            // via the overflow_tx mechanism.
+        move |payload: RequestPayload| {
+            let endpoint = server_ep.clone();
+            tokio::spawn(async move {
+                while endpoint
+                    .handles()
+                    .next_chunk(payload.req_body_handle)
+                    .await
+                    .is_ok_and(|chunk| chunk.is_some())
+                {}
+                let _ = respond(endpoint.handles(), payload.req_handle, 413, vec![]);
+                let _ = endpoint.handles().finish_body(payload.res_body_handle);
+            });
         },
     );
 

@@ -82,15 +82,21 @@ export interface ServeOptions {
   maxConnectionsPerPeer?: number;
 
   /**
-   * Per-request timeout in milliseconds.  0 = disabled.
-   * @default 60_000
+   * Application execution timeout in milliseconds. 0 = disabled.
+   * @default disabled
    */
   requestTimeout?: number;
+
+  /** Maximum time to receive a complete request head. 0 = disabled. @default 15_000 */
+  requestHeadTimeout?: number;
+
+  /** Maximum time a consumed request body may make no progress. 0 = disabled. @default 30_000 */
+  bodyIdleTimeout?: number;
 
   /**
    * Reject request bodies larger than this many **wire** (compressed) bytes.
    * Guards against high-bandwidth floods at the network level.
-   * @default 16_777_216 (16 MiB)
+   * @default unlimited
    */
   maxRequestBodyWireBytes?: number;
 
@@ -98,13 +104,13 @@ export interface ServeOptions {
    * Reject request bodies larger than this many **decoded** bytes (after
    * decompression). This is the primary compression-bomb guard — a zstd
    * payload that is tiny on the wire but expands to GB is caught here.
-   * @default 16_777_216 (16 MiB)
+   * @default unlimited
    */
   maxRequestBodyDecodedBytes?: number;
 
   /**
    * Maximum total QUIC connections the server will accept.
-   * @default unlimited
+   * @default 1024
    */
   maxTotalConnections?: number;
 
@@ -248,6 +254,8 @@ export function makeServe(
       maxConcurrency: options.maxConcurrency,
       maxConnectionsPerPeer: options.maxConnectionsPerPeer,
       requestTimeout: options.requestTimeout,
+      requestHeadTimeout: options.requestHeadTimeout,
+      bodyIdleTimeout: options.bodyIdleTimeout,
       maxRequestBodyWireBytes: options.maxRequestBodyWireBytes,
       maxRequestBodyDecodedBytes: options.maxRequestBodyDecodedBytes,
       maxTotalConnections: options.maxTotalConnections,

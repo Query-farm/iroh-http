@@ -46,6 +46,7 @@
 //! is unified even if the inner type still spells `hyper::Error`.
 
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -135,8 +136,11 @@ pub(crate) type ClientService =
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct StackConfig {
-    /// Per-request timeout. `None` ⇒ no `TimeoutLayer` is applied.
+    /// Application execution timeout. `None` ⇒ no `TimeoutLayer` is applied.
     pub timeout: Option<Duration>,
+    /// Maximum time a request body may remain pending while it is actively
+    /// being consumed. `None` disables progress-based body protection.
+    pub body_idle_timeout: Option<Duration>,
     /// Maximum **wire** request body size before the server rejects with 413.
     ///
     /// This limit is applied **before** decompression, i.e. it counts compressed
@@ -151,9 +155,8 @@ pub struct StackConfig {
     /// This limit is applied **after** decompression. It is the primary guard
     /// against compression bombs: a zstd payload that is tiny on the wire but
     /// expands to GB in memory is rejected once the decoded byte count crosses
-    /// this threshold. The default at the [`super::serve`] entry point
-    /// is 16 MiB (matching the documented behaviour that the old single-limit
-    /// field `max_request_body_bytes` had always promised but never delivered).
+    /// this threshold. Transparent proxies normally leave this unset and let
+    /// the application-facing server enforce its semantic decoded size.
     pub max_request_body_decoded_bytes: Option<usize>,
     /// `true` ⇒ wrap with `LoadShedLayer` so saturated capacity returns 503
     /// immediately rather than blocking the caller.
@@ -173,6 +176,7 @@ impl Default for StackConfig {
     fn default() -> Self {
         Self {
             timeout: None,
+            body_idle_timeout: None,
             max_request_body_wire_bytes: None,
             max_request_body_decoded_bytes: None,
             load_shed: false,
@@ -209,11 +213,12 @@ impl StackConfig {
 /// Layer ordering (outermost first):
 ///
 /// ```text
-///   wire body limit  →  load shed  →  request timeout
-///                    →  compression (response)
-///                    →  decompression (request)
-///                    →  decoded body limit
-///                    →  svc
+///   body idle timeout  →  wire body limit  →  load shed
+///                      →  request timeout
+///                      →  compression (response)
+///                      →  decompression (request)
+///                      →  decoded body limit
+///                      →  svc
 /// ```
 ///
 /// Built bottom-up (innermost first) by chaining `apply_*` factories,
@@ -238,7 +243,109 @@ pub(crate) fn build_stack(svc: ServeService, cfg: &StackConfig) -> ServeService 
     let svc = apply_compression(svc, cfg.compression.as_ref());
     let svc = apply_timeout(svc, cfg.timeout);
     let svc = apply_load_shed(svc, cfg.load_shed);
-    apply_body_limit(svc, cfg.max_request_body_wire_bytes) // outermost: wire bytes
+    let svc = apply_body_limit(svc, cfg.max_request_body_wire_bytes);
+    apply_body_idle_timeout(svc, cfg.body_idle_timeout) // outermost: raw wire progress
+}
+
+/// Bound gaps between frames while an application is actively consuming the
+/// request body. The timer is armed only while the inner body returns Pending,
+/// so application work performed between polls is not mistaken for network
+/// idleness.
+pub(crate) fn apply_body_idle_timeout(
+    svc: ServeService,
+    timeout: Option<Duration>,
+) -> ServeService {
+    use tower::ServiceExt;
+    use tower_http::map_request_body::MapRequestBodyLayer;
+
+    let Some(timeout) = timeout else {
+        return svc;
+    };
+    ServiceBuilder::new()
+        .layer(MapRequestBodyLayer::new(move |body| {
+            Body::new(BodyIdleTimeout::new(body, timeout))
+        }))
+        .service(svc)
+        .boxed_clone()
+}
+
+pin_project_lite::pin_project! {
+    struct BodyIdleTimeout<B> {
+        #[pin]
+        inner: B,
+        timeout: Duration,
+        timer: Option<Pin<Box<tokio::time::Sleep>>>,
+        done: bool,
+    }
+}
+
+impl<B> BodyIdleTimeout<B> {
+    fn new(inner: B, timeout: Duration) -> Self {
+        Self {
+            inner,
+            timeout,
+            timer: None,
+            done: false,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("request body made no progress before the idle timeout")]
+struct BodyIdleTimeoutError;
+
+impl<B> http_body::Body for BodyIdleTimeout<B>
+where
+    B: http_body::Body<Data = Bytes>,
+    B::Error: Into<BoxError>,
+{
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::future::Future;
+
+        let mut this = self.project();
+        if *this.done {
+            return std::task::Poll::Ready(None);
+        }
+        match this.inner.as_mut().poll_frame(cx) {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                *this.timer = None;
+                std::task::Poll::Ready(Some(Ok(frame)))
+            }
+            std::task::Poll::Ready(Some(Err(error))) => {
+                *this.done = true;
+                std::task::Poll::Ready(Some(Err(error.into())))
+            }
+            std::task::Poll::Ready(None) => {
+                *this.done = true;
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => {
+                let timer = this
+                    .timer
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(*this.timeout)));
+                if timer.as_mut().poll(cx).is_ready() {
+                    *this.done = true;
+                    std::task::Poll::Ready(Some(Err(Box::new(BodyIdleTimeoutError))))
+                } else {
+                    std::task::Poll::Pending
+                }
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done || self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 // ── Renormalisation helper ───────────────────────────────────────────────────
@@ -297,7 +404,7 @@ pub(crate) fn apply_load_shed(svc: ServeService, enabled: bool) -> ServeService 
         .boxed_clone()
 }
 
-/// Per-request timeout. The `Elapsed` error is converted to a 408
+/// Application execution timeout. The `Elapsed` error is converted to a 408
 /// response by an inner [`HandleLayerErrorLayer`] so the resulting
 /// service still has `Error = Infallible`. No-op when `timeout = None`.
 pub(crate) fn apply_timeout(svc: ServeService, timeout: Option<Duration>) -> ServeService {
@@ -538,12 +645,26 @@ mod tests {
     fn default_cfg() -> StackConfig {
         StackConfig {
             timeout: None,
+            body_idle_timeout: None,
             max_request_body_wire_bytes: Some(1024 * 1024),
             max_request_body_decoded_bytes: Some(1024 * 1024),
             load_shed: true,
             compression: None,
             decompression: true,
         }
+    }
+
+    #[tokio::test]
+    async fn body_idle_timeout_fails_a_stalled_stream() {
+        let inner = http_body_util::StreamBody::new(futures::stream::pending::<
+            Result<http_body::Frame<Bytes>, Infallible>,
+        >());
+        let body = BodyIdleTimeout::new(inner, Duration::from_millis(10));
+        let error = Body::new(body)
+            .collect()
+            .await
+            .expect_err("stalled body must time out");
+        assert!(error.to_string().contains("made no progress"));
     }
 
     fn boxed_echo() -> ServeService {

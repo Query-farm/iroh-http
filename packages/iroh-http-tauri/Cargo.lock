@@ -931,7 +931,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.118",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -947,9 +947,9 @@ dependencies = [
 
 [[package]]
 name = "der"
-version = "0.8.0"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b"
+checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
 dependencies = [
  "const-oid",
  "pem-rfc7468",
@@ -2456,36 +2456,8 @@ dependencies = [
 name = "iroh-http-adapter"
 version = "0.6.2"
 dependencies = [
- "iroh-http-core",
+ "query-farm-iroh-http-core",
  "serde_json",
-]
-
-[[package]]
-name = "iroh-http-core"
-version = "0.6.2"
-dependencies = [
- "base32",
- "bytes",
- "dashmap",
- "futures",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "iroh",
- "moka",
- "pin-project-lite",
- "rand",
- "serde",
- "serde_json",
- "slotmap",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "tower-http 0.7.0",
- "tracing",
- "url",
 ]
 
 [[package]]
@@ -2496,8 +2468,8 @@ dependencies = [
  "futures",
  "if-addrs",
  "iroh",
- "iroh-http-core",
  "mdns-sd",
+ "query-farm-iroh-http-core",
  "tokio",
  "tracing",
 ]
@@ -3960,6 +3932,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "query-farm-iroh-http-core"
+version = "0.6.3"
+dependencies = [
+ "base32",
+ "bytes",
+ "dashmap",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "iroh",
+ "moka",
+ "pin-project-lite",
+ "rand",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http 0.7.0",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4887,6 +4887,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
 dependencies = [
  "proc-macro2",
+ "quote",
  "unicode-ident",
 ]
 
@@ -5157,8 +5158,8 @@ dependencies = [
  "if-addrs",
  "iroh",
  "iroh-http-adapter",
- "iroh-http-core",
  "iroh-http-discovery",
+ "query-farm-iroh-http-core",
  "rustls",
  "serde",
  "serde_json",

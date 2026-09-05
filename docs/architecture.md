@@ -108,7 +108,9 @@ Core's `serve()` accepts an `on_request: Arc<dyn Fn(RequestPayload) + Send + Syn
 1. Called exactly **once per accepted HTTP request** (one call per QUIC bi-stream).
 2. Called from a Tokio task — the callback must be `Send + Sync` and must not block the Tokio runtime.
 3. The callback receives a `RequestPayload` containing opaque handles; it does not own the underlying resources (those live in the core slab registries).
-4. If the callback is slow, the per-request timeout (`request_timeout_ms`) still applies — the hyper response channel will time out regardless of callback latency.
+4. If an execution timeout is configured, a slow callback is included in that
+   budget. Execution is unbounded by default so long-running application work
+   must use an operator or client deadline when one is required.
 5. The callback must not panic. A panic in a Tokio task aborts only that task, but the request will hang until the timeout fires.
 
 Each adapter is responsible for surfacing errors from its callback mechanism. The core does not observe whether the callback succeeded.
@@ -211,13 +213,17 @@ Handles cross FFI as `u64`. In JavaScript: transmitted as `BigInt`, converted at
 | Limit | Default | Config |
 |-------|---------|--------|
 | Max concurrent requests | 1024 | `ServeOptions::max_concurrency` |
-| Per-request timeout | 60 000 ms | `ServeOptions::request_timeout_ms` |
+| Request-head timeout | 15 000 ms | `ServeOptions::request_head_timeout_ms` |
+| Request-body idle timeout | 30 000 ms | `ServeOptions::body_idle_timeout_ms` |
+| Application execution timeout | disabled | `ServeOptions::request_timeout_ms` |
 | Per-peer connection limit | 8 | `ServeOptions::max_connections_per_peer` |
 | Max request head size | 64 KB | `NodeOptions::max_header_size` |
-| Max request body size | none | `ServeOptions::max_request_body_bytes` |
+| Max request body size | none | `ServeOptions::max_request_body_wire_bytes` / `max_request_body_decoded_bytes` |
 | Drain timeout | 30 000 ms | `ServeOptions::drain_timeout_ms` |
 
-All defaults are safe against hostile peers without opt-in. Increasing limits is always explicit.
+Defaults bound memory buffering, headers, connections, and concurrent request
+slots. Total body-size and application execution policy remain explicit because
+streaming applications have workload-specific budgets.
 
 > **Source of truth:** these defaults are defined in `crates/iroh-http-core/src/http/server/options.rs` (e.g. `DEFAULT_CONCURRENCY = 1024`). Docs should mirror those constants — if they ever disagree, the code wins.
 

@@ -307,6 +307,8 @@ class TauriAdapter extends IrohAdapter {
         maxConnectionsPerPeer: options.serveOptions?.maxConnectionsPerPeer ??
           null,
         requestTimeout: options.serveOptions?.requestTimeout ?? null,
+        requestHeadTimeout: options.serveOptions?.requestHeadTimeout ?? null,
+        bodyIdleTimeout: options.serveOptions?.bodyIdleTimeout ?? null,
         maxRequestBodyWireBytes:
           options.serveOptions?.maxRequestBodyWireBytes ?? null,
         maxRequestBodyDecodedBytes:

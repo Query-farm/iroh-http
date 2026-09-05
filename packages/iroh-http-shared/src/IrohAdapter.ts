@@ -141,6 +141,8 @@ export interface FfiServeOptions {
   maxConcurrency?: number;
   maxConnectionsPerPeer?: number;
   requestTimeout?: number;
+  requestHeadTimeout?: number;
+  bodyIdleTimeout?: number;
   maxRequestBodyWireBytes?: number;
   maxRequestBodyDecodedBytes?: number;
   maxTotalConnections?: number;

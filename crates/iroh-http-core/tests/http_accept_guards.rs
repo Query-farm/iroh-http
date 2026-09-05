@@ -65,9 +65,9 @@ async fn serve_loop_times_out_slow_request_head() {
     let (server_ep, client_ep) = common::make_pair().await;
     let addr = server_addr(&server_ep);
 
-    // Short head-read budget (reuses the request timeout).
+    // Short, independently configured head-read budget.
     let opts = ServeOptions {
-        request_timeout_ms: Some(200),
+        request_head_timeout_ms: Some(200),
         ..Default::default()
     };
     let _serve = ffi_serve(server_ep.clone(), opts, |_p: RequestPayload| {});

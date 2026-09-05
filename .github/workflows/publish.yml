@@ -1,383 +1,52 @@
-name: Publish
-
-# Manually promotes a tagged release to the immutable registries (npm, crates.io,
-# JSR). Publishing NEVER auto-fires — a maintainer deliberately dispatches this
-# workflow once the tag's Build and Extended tests are green and its Benchmarks
-# snapshot has completed.
-#
-# Manual usage (Actions → Run workflow):
-#   tag: the release tag to promote (e.g. v0.6.0). Its commit SHA is resolved to
-#        the tag's successful `Build` run, whose native artifacts are published.
-#
-# All publish steps are idempotent — safe to run multiple times.
+name: Publish Query Farm core
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to publish (e.g. v0.6.0)'
+        description: Release tag, for example v0.6.3
         required: true
         type: string
-      target:
-        description: 'Which packages to publish'
-        required: false
-        default: 'all'
-        type: choice
-        options: [all, npm, crates, jsr]
 
 permissions:
   contents: read
-  actions: read    # resolve the head SHA of the Build run + poll extended-tests
-  id-token: write   # npm --provenance (Trusted Publishers) + JSR OIDC
+  id-token: write
 
 jobs:
-
-  # ── 0a. Resolve ref ───────────────────────────────────────────────────────────
-  # Determine the EXACT commit whose artifacts we are about to publish, so the
-  # source we check out matches the native binaries built from that run. Resolve
-  # the dispatched tag to its commit SHA, then find the tag's successful `Build`
-  # run and export that run's id so the publish jobs download the matching native
-  # artifacts. Fail closed if the tag has no successful Build run.
-
-  resolve-ref:
-    name: Resolve publish ref
+  publish:
+    name: Publish query-farm-iroh-http-core
     runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.resolve.outputs.tag }}
-      sha: ${{ steps.resolve.outputs.sha }}
-      build_run_id: ${{ steps.resolve.outputs.build_run_id }}
-    steps:
-      - name: Resolve tag to commit SHA and Build run
-        id: resolve
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::'$TAG' is not a valid release tag"
-            exit 1
-          fi
-
-          # The commits endpoint also accepts branches and raw SHAs. Prove the
-          # requested name exists specifically under refs/tags before using it.
-          gh api "repos/${{ github.repository }}/git/ref/tags/$TAG" --silent
-          echo "Resolving commit SHA for tag $TAG"
-          # Dereference the tag to its underlying COMMIT sha. The commits endpoint
-          # resolves a ref (lightweight OR annotated tag) straight to the commit,
-          # so annotated tags don't leave us holding the tag-object sha. This is
-          # the same commit a tag-push run reports as its head_sha, so the Build
-          # lookup and the extended-tests verify poll below both match it.
-          SHA=$(gh api "repos/${{ github.repository }}/commits/$TAG" --jq '.sha')
-          if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
-            echo "::error::Could not resolve tag $TAG to a commit SHA"
-            exit 1
-          fi
-          echo "Tag $TAG points at commit $SHA"
-
-          echo "Looking for a successful Build run for $SHA"
-          # Pick the newest Build run that (a) ran against this exact commit,
-          # (b) succeeded, and (c) was triggered by the tag push — so a manual
-          # re-run, a branch build, or an unrelated run on the same commit can't
-          # be mis-selected. The API returns runs newest-first.
-          BUILD_RUN_ID=$(gh api \
-            "repos/${{ github.repository }}/actions/workflows/build.yml/runs?head_sha=$SHA&event=push&per_page=100" \
-            --jq "[.workflow_runs[]
-                   | select(.head_sha == \"$SHA\"
-                            and .head_branch == \"$TAG\"
-                            and .event == \"push\"
-                            and .status == \"completed\"
-                            and .conclusion == \"success\")]
-                   | first | .id")
-          if [ -z "$BUILD_RUN_ID" ] || [ "$BUILD_RUN_ID" = "null" ]; then
-            echo "::error::No successful tag-push Build run found for tag $TAG ($SHA) — refusing to publish"
-            exit 1
-          fi
-          echo "Publishing artifacts from Build run $BUILD_RUN_ID (commit $SHA)"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "build_run_id=$BUILD_RUN_ID" >> "$GITHUB_OUTPUT"
-
-  # ── 0. Verify ─────────────────────────────────────────────────────────────────
-  # The extended-tests gate runs for the resolved SHA — a manual promotion must
-  # prove the published commit passed extended tests before anything ships.
-
-  verify:
-    name: Verify before publish
-    runs-on: ubuntu-latest
-    needs: resolve-ref
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.resolve-ref.outputs.sha }}
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-
-      - name: Verify tag matches every package version
-        env:
-          TAG: ${{ needs.resolve-ref.outputs.tag }}
-        run: bash scripts/check-release-version.sh "$TAG"
-
-      - name: Verify extended tests passed
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.resolve-ref.outputs.tag }}
-          SHA: ${{ needs.resolve-ref.outputs.sha }}
-        run: |
-          echo "Checking tag-triggered Extended tests status for $TAG ($SHA)"
-          # Poll for up to 30 minutes (extended tests can take a while)
-          for i in $(seq 1 60); do
-            STATUS=$(gh api \
-              "repos/${{ github.repository }}/actions/workflows/extended-tests.yml/runs?head_sha=$SHA&event=push&per_page=100" \
-              --jq "[.workflow_runs[]
-                     | select(.head_sha == \"$SHA\"
-                              and .head_branch == \"$TAG\"
-                              and .event == \"push\")]
-                     | first | \"\(.status) \(.conclusion)\"" \
-              2>/dev/null || echo "unknown unknown")
-            RUN_STATUS=$(echo "$STATUS" | awk '{print $1}')
-            RUN_CONCLUSION=$(echo "$STATUS" | awk '{print $2}')
-            if [ "$RUN_STATUS" = "completed" ]; then
-              if [ "$RUN_CONCLUSION" = "success" ]; then
-                echo "Extended tests passed ✓"
-                exit 0
-              else
-                echo "::error::Extended tests failed ($RUN_CONCLUSION) — blocking publish"
-                exit 1
-              fi
-            fi
-            echo "Extended tests still running ($RUN_STATUS), waiting 30s... ($i/60)"
-            sleep 30
-          done
-          echo "::error::Extended tests did not complete within 30 minutes — blocking publish"
-          exit 1
-
-      - run: npm ci --omit=optional
-
-      - name: Build shared TypeScript
-        run: npm run build --workspace=packages/iroh-http-shared
-
-      - name: TypeScript typecheck
-        run: |
-          npm run typecheck --workspace=packages/iroh-http-shared
-          npm run typecheck --workspace=packages/iroh-http-tauri
-
-  # ── 1. Publish Rust crates ────────────────────────────────────────────────────
-  # cargo publish already polls for index availability after upload (built-in).
-  # No manual wait steps needed between crates.
-
-  publish-crates:
-    name: Publish Rust crates
-    runs-on: ubuntu-latest
-    needs: [resolve-ref, verify]
     environment: release
-    if: inputs.target == null || inputs.target == 'all' || inputs.target == 'crates'
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve-ref.outputs.sha }}
+          ref: ${{ inputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish iroh-http-core
-        run: |
-          output=$(cargo publish -p iroh-http-core 2>&1) && exit 0
-          if echo "$output" | grep -qi 'already uploaded\|already exists'; then
-            echo "Already published, skipping"
-          else
-            echo "$output" >&2
-            exit 1
-          fi
+      - name: Verify tag and package version
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish iroh-http-adapter
+          TAG: ${{ inputs.tag }}
         run: |
-          output=$(cargo publish -p iroh-http-adapter 2>&1) && exit 0
-          if echo "$output" | grep -qi 'already uploaded\|already exists'; then
-            echo "Already published, skipping"
-          else
-            echo "$output" >&2
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::invalid release tag: $TAG"; exit 1 ;;
+          esac
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "query-farm-iroh-http-core") | .version')
+          test "v$version" = "$TAG" || {
+            echo "::error::tag $TAG does not match package version $version"
             exit 1
-          fi
+          }
+
+      - name: Verify package contents
+        run: cargo package -p query-farm-iroh-http-core --locked
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish package
+        run: cargo publish -p query-farm-iroh-http-core --locked
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish iroh-http-discovery
-        run: |
-          output=$(cargo publish -p iroh-http-discovery 2>&1) && exit 0
-          if echo "$output" | grep -qi 'already uploaded\|already exists'; then
-            echo "Already published, skipping"
-          else
-            echo "$output" >&2
-            exit 1
-          fi
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish tauri-plugin-iroh-http
-        # --no-verify: Tauri depends on system libraries (glib, gtk, webkit)
-        # not present on the publish runner. Compilation is already verified
-        # by the CI workflow (cargo test/clippy on the full workspace).
-        run: |
-          output=$(cargo publish --manifest-path packages/iroh-http-tauri/Cargo.toml --no-verify 2>&1) && exit 0
-          if echo "$output" | grep -qi 'already uploaded\|already exists'; then
-            echo "Already published, skipping"
-          else
-            echo "$output" >&2
-            exit 1
-          fi
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  # ── 2. Publish npm packages ────────────────────────────────────────────────────
-  # Uses npm Trusted Publishers (OIDC) — no NPM_TOKEN needed.
-  # One-time setup per package: npmjs.com → package Settings → Trusted Publishers
-  # → add this workflow (Momics/iroh-http, publish.yml).
-  # Packages: iroh-http-shared, iroh-http-node, iroh-http-tauri,
-  #           + all 5 iroh-http-node-* platform packages.
-
-  publish-npm:
-    name: Publish npm packages
-    runs-on: ubuntu-latest
-    needs: [resolve-ref, verify]
-    environment: release
-    if: inputs.target == null || inputs.target == 'all' || inputs.target == 'npm'
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.resolve-ref.outputs.sha }}
-
-      # NOTE: deliberately no `registry-url` here. setup-node's registry-url
-      # writes an .npmrc with an empty `_authToken=${NODE_AUTH_TOKEN}`, which
-      # suppresses npm's OIDC Trusted Publishing exchange and causes anonymous
-      # publishes (E404). Trusted Publishing needs a clean .npmrc + id-token.
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-
-      - run: npm ci --omit=optional
-
-      - name: Download Node native artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: node-native-*
-          path: packages/iroh-http-node/artifacts/
-          merge-multiple: true
-          run-id: ${{ needs.resolve-ref.outputs.build_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Move artifacts into platform package dirs
-        working-directory: packages/iroh-http-node
-        run: npx napi artifacts --build-output-dir artifacts/ --npm-dir npm/
-
-      - name: Publish platform packages
-        run: |
-          for pkg_dir in packages/iroh-http-node/npm/*/; do
-            output=$(npm publish "$pkg_dir" --access public --provenance 2>&1) && continue
-            if echo "$output" | grep -qi 'previously published\|cannot publish over'; then
-              echo "Already published, skipping $pkg_dir"
-            else
-              echo "$output" >&2
-              exit 1
-            fi
-          done
-
-      - name: Build TypeScript
-        run: |
-          npm run build --workspace=packages/iroh-http-shared
-          (cd packages/iroh-http-node && npx tsc)
-          (cd packages/iroh-http-tauri && npx tsc --project tsconfig.json)
-
-      - name: Publish iroh-http-shared
-        run: |
-          output=$(npm publish --workspace packages/iroh-http-shared --access public --provenance 2>&1) && exit 0
-          if echo "$output" | grep -qi 'previously published\|cannot publish over'; then
-            echo "Already published, skipping"
-          else
-            echo "$output" >&2
-            exit 1
-          fi
-
-      - name: Publish iroh-http-node
-        run: |
-          output=$(npm publish --workspace packages/iroh-http-node --access public --provenance 2>&1) && exit 0
-          if echo "$output" | grep -qi 'previously published\|cannot publish over'; then
-            echo "Already published, skipping"
-          else
-            echo "$output" >&2
-            exit 1
-          fi
-
-      - name: Publish iroh-http-tauri
-        run: |
-          output=$(npm publish --workspace packages/iroh-http-tauri --access public --provenance 2>&1) && exit 0
-          if echo "$output" | grep -qi 'previously published\|cannot publish over'; then
-            echo "Already published, skipping"
-          else
-            echo "$output" >&2
-            exit 1
-          fi
-
-  # ── 3. Publish JSR packages ────────────────────────────────────────────────────
-  # Uses JSR OIDC — no DENO_AUTH_TOKENS needed.
-  # One-time setup: jsr.io → each package → Settings → GitHub Actions publishing
-  # → add this workflow (Momics/iroh-http, publish.yml).
-
-  publish-jsr:
-    name: Publish JSR packages
-    runs-on: ubuntu-latest
-    needs: [resolve-ref, verify]
-    environment: release
-    if: inputs.target == null || inputs.target == 'all' || inputs.target == 'jsr'
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.resolve-ref.outputs.sha }}
-
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Publish iroh-http-shared to JSR
-        working-directory: packages/iroh-http-shared
-        run: |
-          output=$(deno publish 2>&1) && exit 0
-          if echo "$output" | grep -qi 'already exists\|already published'; then
-            echo "Already published, skipping"
-          else
-            echo "$output" >&2
-            exit 1
-          fi
-
-      # Populate src/checksums.ts from the exact native binaries built by this
-      # run, so published consumers verify the downloaded library's SHA-256
-      # before Deno.dlopen(). Without this the integrity map ships empty and
-      # downloads are refused (fail-closed) at runtime.
-      - name: Download Deno native artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: deno-native-*
-          path: packages/iroh-http-deno/lib/
-          merge-multiple: true
-          run-id: ${{ needs.resolve-ref.outputs.build_run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate native checksums
-        working-directory: packages/iroh-http-deno
-        run: deno run --allow-read --allow-write=src/checksums.ts scripts/gen-checksums.mts lib
-
-      - name: Publish iroh-http-deno to JSR
-        working-directory: packages/iroh-http-deno
-        run: |
-          # --allow-dirty: src/checksums.ts was just regenerated from the
-          # release artifacts and is intentionally not committed.
-          output=$(deno publish --allow-dirty 2>&1) && exit 0
-          if echo "$output" | grep -qi 'already exists\|already published'; then
-            echo "Already published, skipping"
-          else
-            echo "$output" >&2
-            exit 1
-          fi
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

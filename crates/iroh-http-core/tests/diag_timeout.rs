@@ -6,7 +6,7 @@ use iroh_http_core::{IrohEndpoint, NetworkingOptions, NodeOptions, Session};
 ///
 /// Marked `#[ignore]` because it is a diagnostic/investigative test used to
 /// reproduce connect-timeout scenarios.  Run explicitly with:
-///   cargo test -p iroh-http-core diag_session_connect -- --ignored
+///   cargo test -p query-farm-iroh-http-core diag_session_connect -- --ignored
 #[tokio::test]
 #[ignore = "diagnostic only — run explicitly when investigating connect timeouts"]
 async fn diag_session_connect() {

@@ -3,7 +3,7 @@
 //! overhead from the QUIC transport.
 //!
 //! Run:
-//!   cargo bench -p iroh-http-core --bench channel
+//!   cargo bench -p query-farm-iroh-http-core --bench channel
 //!
 //! These benchmarks measure:
 //!   1. Raw channel throughput (write → read, no handle store)

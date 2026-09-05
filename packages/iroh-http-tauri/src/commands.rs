@@ -731,6 +731,8 @@ pub struct ServeArgs {
     pub max_concurrency: Option<usize>,
     pub max_connections_per_peer: Option<usize>,
     pub request_timeout: Option<f64>,
+    pub request_head_timeout: Option<f64>,
+    pub body_idle_timeout: Option<f64>,
     pub max_request_body_wire_bytes: Option<f64>,
     pub max_request_body_decoded_bytes: Option<f64>,
     pub max_total_connections: Option<f64>,
@@ -755,6 +757,8 @@ pub async fn serve(
 
     let serve = coerce_serve_options(RawServeOptions {
         request_timeout_ms: args.request_timeout,
+        request_head_timeout_ms: args.request_head_timeout,
+        body_idle_timeout_ms: args.body_idle_timeout,
         max_request_body_wire_bytes: args.max_request_body_wire_bytes,
         max_request_body_decoded_bytes: args.max_request_body_decoded_bytes,
         max_total_connections: args.max_total_connections,
@@ -765,6 +769,8 @@ pub async fn serve(
         max_concurrency: args.max_concurrency,
         max_connections_per_peer: args.max_connections_per_peer,
         request_timeout_ms: serve.request_timeout_ms,
+        request_head_timeout_ms: serve.request_head_timeout_ms,
+        body_idle_timeout_ms: serve.body_idle_timeout_ms,
         connection_idle_timeout_ms: None,
         max_request_body_wire_bytes: serve.max_request_body_wire_bytes,
         max_request_body_decoded_bytes: serve.max_request_body_decoded_bytes,

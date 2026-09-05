@@ -154,9 +154,11 @@ Duplex mode uses HTTP Upgrade semantics. The ALPN for duplex connections is `iro
 | Limit | Configured via | Enforcement |
 |-------|---------------|-------------|
 | Max header size | `NodeOptions::max_header_size` (default 64 KB) | `max_buf_size(limit.max(8192))` on hyper builder + post-parse byte-count check |
-| Max request body | `ServeOptions::max_request_body_bytes` | Byte counter in `pump_hyper_body_to_channel_limited` |
+| Max request body | Optional wire and decoded fields on `ServeOptions` | Streaming body-limit layers; no full-body buffering |
 | Max concurrent requests | `ServeOptions::max_concurrency` / `ConnectionServeOptions::max_concurrency` (default 1024) | Shared Tower `GlobalConcurrencyLimitLayer`: one permit per in-flight bi-stream |
-| Per-request timeout | `ServeOptions::request_timeout_ms` (default 60 s) | `TimeoutService` wrapping `RequestService` |
+| Request-head timeout | `ServeOptions::request_head_timeout_ms` (default 15 s) | Hyper request-head timer |
+| Request-body idle timeout | `ServeOptions::body_idle_timeout_ms` (default 30 s) | Progress timer armed while the body is polled |
+| Application execution timeout | `ServeOptions::request_timeout_ms` (disabled by default) | `TimeoutService` wrapping `RequestService` |
 | Max connections per peer | `ServeOptions::max_connections_per_peer` (default 8) | `PeerConnectionGuard` + `DashMap` counter |
 
 > `max_buf_size` on hyper's builder **panics** for values below 8192. Always clamp: `limit.max(8192)`. The actual limit is then enforced by counting bytes across the parsed headers after hyper returns them.

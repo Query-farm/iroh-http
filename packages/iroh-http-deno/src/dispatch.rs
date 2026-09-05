@@ -785,6 +785,8 @@ async fn serve_start(p: Value) -> Value {
     // Parse optional serve options from payload.
     let serve = match coerce_serve_options(RawServeOptions {
         request_timeout_ms: p["requestTimeout"].as_f64(),
+        request_head_timeout_ms: p["requestHeadTimeout"].as_f64(),
+        body_idle_timeout_ms: p["bodyIdleTimeout"].as_f64(),
         max_request_body_wire_bytes: p["maxRequestBodyWireBytes"].as_f64(),
         max_request_body_decoded_bytes: p["maxRequestBodyDecodedBytes"].as_f64(),
         max_total_connections: p["maxTotalConnections"].as_f64(),
@@ -797,6 +799,8 @@ async fn serve_start(p: Value) -> Value {
         max_concurrency: p["maxConcurrency"].as_u64().map(|v| v as usize),
         max_connections_per_peer: p["maxConnectionsPerPeer"].as_u64().map(|v| v as usize),
         request_timeout_ms: serve.request_timeout_ms,
+        request_head_timeout_ms: serve.request_head_timeout_ms,
+        body_idle_timeout_ms: serve.body_idle_timeout_ms,
         connection_idle_timeout_ms: None,
         max_request_body_wire_bytes: serve.max_request_body_wire_bytes,
         max_request_body_decoded_bytes: serve.max_request_body_decoded_bytes,
@@ -851,7 +855,7 @@ async fn stop_serve(p: Value) -> Value {
     serve_registry::signal_shutdown(handle);
     // Drain any queued-but-undelivered requests and respond 503 so the
     // core handler tasks wake up and decrement in-flight immediately,
-    // instead of stalling until the 60s tower timeout fires.
+    // instead of remaining unresolved when the application timeout is disabled.
     if let Some(queue) = serve_registry::get(handle) {
         if let Ok(mut rx) = queue.rx.try_lock() {
             while let Ok(payload) = rx.try_recv() {
@@ -879,7 +883,7 @@ async fn stop_serve(p: Value) -> Value {
     // overwrite `serve_handle` while the old loop is still draining; new
     // incoming requests would be routed through the old `on_request` closure
     // (capturing the old queue's `tx`) and never delivered to the new
-    // `nextRequest` poller — they would just time out at 60s.
+    // `nextRequest` poller — they would remain unresolved.
     ep.wait_serve_stop().await;
     ok(json!({}))
 }

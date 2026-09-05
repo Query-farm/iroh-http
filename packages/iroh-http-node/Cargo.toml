@@ -14,7 +14,7 @@ default = ["discovery"]
 discovery = ["iroh-http-discovery/mdns", "iroh"]
 
 [dependencies]
-iroh-http-core = { path = "../../crates/iroh-http-core", version = "0.6.2" }
+iroh-http-core = { package = "query-farm-iroh-http-core", path = "../../crates/iroh-http-core", version = "0.6.3" }
 iroh-http-adapter = { path = "../../crates/iroh-http-adapter", version = "0.6.2" }
 iroh-http-discovery = { path = "../../crates/iroh-http-discovery", version = "0.6.2", optional = true }
 iroh = { workspace = true, optional = true }

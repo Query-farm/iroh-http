@@ -35,8 +35,9 @@ use crate::{Body, ConnectionEvent, IrohEndpoint};
 
 use self::accept::{accept_loop, AcceptConfig};
 use self::options::{
-    DEFAULT_CONCURRENCY, DEFAULT_CONNECTION_IDLE_TIMEOUT_MS, DEFAULT_DRAIN_TIMEOUT_MS,
-    DEFAULT_MAX_CONNECTIONS_PER_PEER, DEFAULT_MAX_TOTAL_CONNECTIONS, DEFAULT_REQUEST_TIMEOUT_MS,
+    DEFAULT_BODY_IDLE_TIMEOUT_MS, DEFAULT_CONCURRENCY, DEFAULT_CONNECTION_IDLE_TIMEOUT_MS,
+    DEFAULT_DRAIN_TIMEOUT_MS, DEFAULT_MAX_CONNECTIONS_PER_PEER, DEFAULT_MAX_TOTAL_CONNECTIONS,
+    DEFAULT_REQUEST_HEAD_TIMEOUT_MS,
 };
 
 // Re-exported from sub-modules so external paths
@@ -160,14 +161,20 @@ where
             request_timeout: match options.request_timeout_ms {
                 Some(0) => None,
                 Some(milliseconds) => Some(Duration::from_millis(milliseconds)),
-                None => Some(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS)),
+                None => None,
             },
-            max_request_body_wire_bytes: options
-                .max_request_body_wire_bytes
-                .or(Some(DEFAULT_MAX_REQUEST_BODY_BYTES)),
-            max_request_body_decoded_bytes: options
-                .max_request_body_decoded_bytes
-                .or(Some(DEFAULT_MAX_REQUEST_BODY_BYTES)),
+            request_head_timeout: match options.request_head_timeout_ms {
+                Some(0) => None,
+                Some(milliseconds) => Some(Duration::from_millis(milliseconds)),
+                None => Some(Duration::from_millis(DEFAULT_REQUEST_HEAD_TIMEOUT_MS)),
+            },
+            body_idle_timeout: match options.body_idle_timeout_ms {
+                Some(0) => None,
+                Some(milliseconds) => Some(Duration::from_millis(milliseconds)),
+                None => Some(Duration::from_millis(DEFAULT_BODY_IDLE_TIMEOUT_MS)),
+            },
+            max_request_body_wire_bytes: options.max_request_body_wire_bytes,
+            max_request_body_decoded_bytes: options.max_request_body_decoded_bytes,
             drain_timeout: Duration::from_millis(
                 options.drain_timeout_ms.unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS),
             ),

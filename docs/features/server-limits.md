@@ -14,19 +14,25 @@ node.serve({
   /** Maximum simultaneous connections from a single peer. Default: 8. */
   maxConnectionsPerPeer: 8,
 
-  /** Per-request timeout in milliseconds. Default: 60 000. */
-  requestTimeout: 60_000,
+  /** Optional application execution timeout. Disabled by default. */
+  requestTimeout: 10 * 60_000,
+
+  /** Time allowed to receive a complete request head. Default: 15 000. */
+  requestHeadTimeout: 15_000,
+
+  /** Maximum no-progress interval while consuming a body. Default: 30 000. */
+  bodyIdleTimeout: 30_000,
 
   /** Reject request bodies larger than this many wire (compressed) bytes,
-   *  before the body is read. Guards against bandwidth floods. Default: 16 MiB. */
+   *  while the body is streamed. Optional and unlimited by default. */
   maxRequestBodyWireBytes: 10 * 1024 * 1024,  // 10 MB example
 
   /** Reject request bodies larger than this many decoded bytes (after
-   *  decompression). Primary compression-bomb guard. Default: 16 MiB. */
+   *  decompression). Optional and unlimited by default. */
   maxRequestBodyDecodedBytes: 10 * 1024 * 1024,  // 10 MB example
 
-  /** Drain timeout in ms after shutdown signal. Default: 5 000. */
-  drainTimeout: 5_000,
+  /** Drain timeout in ms after shutdown signal. Default: 30 000. */
+  drainTimeout: 30_000,
 }, handler);
 
 // Header size is configured at node level:
@@ -38,7 +44,8 @@ const node = await createNode({
 });
 ```
 
-All limits are optional. Omitting a limit uses the default shown above.
+All limits are optional. Omitting a size limit leaves it unlimited; applications
+should enforce and advertise their own semantic request budget.
 
 ## Why at the Rust layer
 
@@ -46,10 +53,11 @@ These limits intercept bytes or connections before they reach the FFI
 boundary. A JS handler never runs for a rejected request, so no user code
 needs to handle the overflow cases.
 
-For example, without a request-body limit a peer could stream an unbounded
-body, accumulating data in the channel until memory is exhausted. The limits
-are checked as bytes arrive in the Rust body reader — no full-body buffering
-occurs.
+Bodies are streamed with backpressure and are not accumulated by the HTTP
+runtime. A total body limit is therefore a coarse application or transport
+ceiling, not the primary memory bound. The body-idle timeout and concurrency
+limits protect finite transport resources while preserving large streaming
+requests.
 
 Request bodies are capped by two independent limits. `maxRequestBodyWireBytes`
 bounds the **wire** (compressed) size: a declared `Content-Length` larger than
@@ -65,10 +73,11 @@ compression bombs.
 
 | Option | Attack vector | Behavior |
 |---|---|---|
-| `maxConcurrency` | Request flood from many peers | Excess requests queue until a slot is free; if none frees before `requestTimeout`, they receive a `408 Request Timeout` |
+| `maxConcurrency` | Request flood from many peers | Excess requests are rejected with 503 when load shedding is enabled |
 | `maxConnectionsPerPeer` | Connection flood from one peer | Excess connections are closed at the QUIC level (transport close, not an HTTP response) |
-| `requestTimeout` | Slow request / stalled handler | 408 Request Timeout |
+| `requestHeadTimeout` | Incomplete or trickled request head | Stream is closed |
+| `bodyIdleTimeout` | Stalled body while it is being consumed | Body fails and the stream is closed |
+| `requestTimeout` | Application execution exceeding an explicit operator deadline | 408 Request Timeout |
 | `maxRequestBodyWireBytes` | Oversized/compressed body exhausting bandwidth | 413 Content Too Large |
 | `maxRequestBodyDecodedBytes` | Compression bomb exhausting memory | 413 Content Too Large |
 | `maxHeaderBytes` | Header flood exhausting memory | 431 Request Header Fields Too Large |
-

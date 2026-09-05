@@ -78,13 +78,15 @@ configurable via `NodeOptions`):
 
 | Limit | Default | Protects against |
 |---|---|---|
-| `maxRequestBodyWireBytes` | 16 MiB | Oversized/compressed body exhausting bandwidth |
-| `maxRequestBodyDecodedBytes` | 16 MiB | Compression bomb exhausting memory |
+| `maxRequestBodyWireBytes` | disabled | Optional coarse wire-size ceiling |
+| `maxRequestBodyDecodedBytes` | disabled | Optional decompression ceiling |
 | `maxConcurrency` | 1 024 | Request flood from many peers |
 | `maxConnectionsPerPeer` | 8 | Connection flood from one peer |
-| `requestTimeout` | 60 s | Slow request / stalled handler |
+| `requestHeadTimeout` | 15 s | Incomplete request-head slowloris |
+| `bodyIdleTimeout` | 30 s | Stalled body while actively consumed |
+| `requestTimeout` | disabled | Optional application execution deadline |
 | `maxHeaderBytes` | 64 KiB | Header flood exhausting memory |
-| `maxTotalConnections` | unlimited | Total QUIC connection cap |
+| `maxTotalConnections` | 1 024 | Total QUIC connection cap |
 | QUIC `max_concurrent_bidi_streams` | 128 | Stream-level slowloris |
 | Response body limit | 256 MiB | Compression bomb from malicious server |
 

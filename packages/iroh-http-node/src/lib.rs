@@ -1529,16 +1529,20 @@ pub struct JsServeOptions {
     pub max_concurrency: Option<u32>,
     /// Maximum connections from a single peer.  Default: 8.
     pub max_connections_per_peer: Option<u32>,
-    /// Per-request timeout in milliseconds.  Default: 60 000.  0 = disabled.
+    /// Application execution timeout in milliseconds. Default: disabled.
     pub request_timeout: Option<f64>,
+    /// Maximum time to receive a complete request head. Default: 15 000 ms.
+    pub request_head_timeout: Option<f64>,
+    /// Maximum time a consumed request body may make no progress. Default: 30 000 ms.
+    pub body_idle_timeout: Option<f64>,
     /// Reject request bodies larger than this many wire (compressed) bytes.
-    /// Default: 16 MiB when not set.
+    /// Default: unlimited.
     pub max_request_body_wire_bytes: Option<f64>,
     /// Reject request bodies larger than this many decoded bytes (after
     /// decompression). This is the compression-bomb guard.
-    /// Default: 16 MiB when not set.
+    /// Default: unlimited.
     pub max_request_body_decoded_bytes: Option<f64>,
-    /// Maximum total QUIC connections the server will accept.  Default: unlimited.
+    /// Maximum total QUIC connections the server will accept. Default: 1024.
     pub max_total_connections: Option<f64>,
     /// Drain timeout in milliseconds after shutdown signal.  Default: 30000.
     pub drain_timeout: Option<f64>,
@@ -1567,6 +1571,8 @@ pub async fn raw_serve(
             max_concurrency: None,
             max_connections_per_peer: None,
             request_timeout: None,
+            request_head_timeout: None,
+            body_idle_timeout: None,
             max_request_body_wire_bytes: None,
             max_request_body_decoded_bytes: None,
             max_total_connections: None,
@@ -1576,6 +1582,8 @@ pub async fn raw_serve(
         });
         let serve = coerce_serve_options(RawServeOptions {
             request_timeout_ms: o.request_timeout,
+            request_head_timeout_ms: o.request_head_timeout,
+            body_idle_timeout_ms: o.body_idle_timeout,
             max_request_body_wire_bytes: o.max_request_body_wire_bytes,
             max_request_body_decoded_bytes: o.max_request_body_decoded_bytes,
             max_total_connections: o.max_total_connections,
@@ -1586,6 +1594,8 @@ pub async fn raw_serve(
             max_concurrency: o.max_concurrency.map(|v| v as usize),
             max_connections_per_peer: o.max_connections_per_peer.map(|v| v as usize),
             request_timeout_ms: serve.request_timeout_ms,
+            request_head_timeout_ms: serve.request_head_timeout_ms,
+            body_idle_timeout_ms: serve.body_idle_timeout_ms,
             connection_idle_timeout_ms: None,
             max_request_body_wire_bytes: serve.max_request_body_wire_bytes,
             max_request_body_decoded_bytes: serve.max_request_body_decoded_bytes,

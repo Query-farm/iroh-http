@@ -27,7 +27,7 @@ default = ["discovery"]
 discovery = ["dep:iroh-http-discovery"]
 
 [dependencies]
-iroh-http-core = { path = "../../crates/iroh-http-core", version = "0.6.2" }
+iroh-http-core = { package = "query-farm-iroh-http-core", path = "../../crates/iroh-http-core", version = "0.6.3" }
 iroh-http-adapter = { path = "../../crates/iroh-http-adapter", version = "0.6.2" }
 # Used directly for the endpoint address watcher that refreshes mobile peer
 # advertisements. Inherited from `[workspace.dependencies]` above so it stays

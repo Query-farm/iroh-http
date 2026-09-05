@@ -44,11 +44,15 @@ pub struct ConnectionServeOptions {
     pub connection_idle_timeout: Duration,
     /// Maximum simultaneous requests across this runtime. Default: 1024.
     pub max_concurrency: usize,
-    /// Per-request and request-head timeout. `None` disables both.
+    /// Application execution timeout. `None` disables it. Default: disabled.
     pub request_timeout: Option<Duration>,
-    /// Maximum compressed request-body bytes. Default: 16 MiB.
+    /// Maximum time to receive a complete HTTP request head. Default: 15 seconds.
+    pub request_head_timeout: Option<Duration>,
+    /// Maximum time a polled request body may make no progress. Default: 30 seconds.
+    pub body_idle_timeout: Option<Duration>,
+    /// Maximum compressed request-body bytes. Default: unlimited.
     pub max_request_body_wire_bytes: Option<usize>,
-    /// Maximum decoded request-body bytes. Default: 16 MiB.
+    /// Maximum decoded request-body bytes. Default: unlimited.
     pub max_request_body_decoded_bytes: Option<usize>,
     /// Maximum graceful delivery drain. Default: 30 seconds.
     pub drain_timeout: Duration,
@@ -71,11 +75,15 @@ impl Default for ConnectionServeOptions {
                 super::options::DEFAULT_CONNECTION_IDLE_TIMEOUT_MS,
             ),
             max_concurrency: super::options::DEFAULT_CONCURRENCY,
-            request_timeout: Some(Duration::from_millis(
-                super::options::DEFAULT_REQUEST_TIMEOUT_MS,
+            request_timeout: None,
+            request_head_timeout: Some(Duration::from_millis(
+                super::options::DEFAULT_REQUEST_HEAD_TIMEOUT_MS,
             )),
-            max_request_body_wire_bytes: Some(super::options::DEFAULT_MAX_REQUEST_BODY_BYTES),
-            max_request_body_decoded_bytes: Some(super::options::DEFAULT_MAX_REQUEST_BODY_BYTES),
+            body_idle_timeout: Some(Duration::from_millis(
+                super::options::DEFAULT_BODY_IDLE_TIMEOUT_MS,
+            )),
+            max_request_body_wire_bytes: None,
+            max_request_body_decoded_bytes: None,
             drain_timeout: Duration::from_millis(super::options::DEFAULT_DRAIN_TIMEOUT_MS),
             load_shed: true,
             max_header_size: 64 * 1024,
@@ -116,6 +124,18 @@ impl ConnectionServeOptions {
                 option: "connection_idle_timeout",
                 reason: "must be greater than zero",
             });
+        }
+        for (option, timeout) in [
+            ("request_timeout", self.request_timeout),
+            ("request_head_timeout", self.request_head_timeout),
+            ("body_idle_timeout", self.body_idle_timeout),
+        ] {
+            if timeout.is_some_and(|value| value.is_zero()) {
+                return Err(ConnectionServeError::InvalidOptions {
+                    option,
+                    reason: "must be greater than zero when enabled",
+                });
+            }
         }
         if self.max_concurrency == 0 {
             return Err(ConnectionServeError::InvalidOptions {
@@ -420,6 +440,7 @@ impl ConnectionServeRuntime {
             connection_service,
             &StackConfig {
                 timeout: self.inner.options.request_timeout,
+                body_idle_timeout: self.inner.options.body_idle_timeout,
                 max_request_body_wire_bytes: self.inner.options.max_request_body_wire_bytes,
                 max_request_body_decoded_bytes: self.inner.options.max_request_body_decoded_bytes,
                 load_shed: self.inner.options.load_shed,
@@ -496,7 +517,7 @@ impl ConnectionServeRuntime {
             let response_stopped = send.stopped();
             let io = TokioIo::new(IrohStream::new(send, recv));
             let request_stack = stack.clone();
-            let header_read_timeout = self.inner.options.request_timeout;
+            let header_read_timeout = self.inner.options.request_head_timeout;
 
             requests.spawn(async move {
                 // `admission` already owns both increments before this future
@@ -652,6 +673,16 @@ fn report_request_join(completed: Option<Result<(), tokio::task::JoinError>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defaults_separate_progress_from_application_limits() {
+        let options = ConnectionServeOptions::default();
+        assert_eq!(options.request_timeout, None);
+        assert_eq!(options.request_head_timeout, Some(Duration::from_secs(15)));
+        assert_eq!(options.body_idle_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(options.max_request_body_wire_bytes, None);
+        assert_eq!(options.max_request_body_decoded_bytes, None);
+    }
 
     #[tokio::test]
     async fn shutdown_barrier_rejects_a_stream_after_its_early_observation() {

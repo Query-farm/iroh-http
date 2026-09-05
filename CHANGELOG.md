@@ -1,3 +1,18 @@
+## [0.6.3] - 2026-09-05
+
+### Query Farm packaging
+
+- Publish the negotiated-connection runtime as `query-farm-iroh-http-core`.
+- Preserve the conventional Rust import name through Cargo dependency aliases.
+- Add a crates.io Trusted Publishing workflow scoped to the renamed core.
+
+### Server behavior
+
+- Separate request-head, request-body idle, and optional application execution
+  timeouts.
+- Stream request bodies without an implicit total-byte ceiling; wire and
+  decoded limits remain available as explicit coarse safeguards.
+
 ## [0.6.2] - 2026-08-28
 
 ### 🐛 Bug Fixes

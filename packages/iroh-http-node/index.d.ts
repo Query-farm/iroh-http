@@ -283,20 +283,24 @@ export interface JsServeOptions {
   maxConcurrency?: number
   /** Maximum connections from a single peer.  Default: 8. */
   maxConnectionsPerPeer?: number
-  /** Per-request timeout in milliseconds.  Default: 60 000.  0 = disabled. */
+  /** Application execution timeout in milliseconds. Default: disabled. */
   requestTimeout?: number
+  /** Maximum time to receive a complete request head. Default: 15 000 ms. */
+  requestHeadTimeout?: number
+  /** Maximum time a consumed request body may make no progress. Default: 30 000 ms. */
+  bodyIdleTimeout?: number
   /**
    * Reject request bodies larger than this many wire (compressed) bytes.
-   * Default: 16 MiB when not set.
+   * Default: unlimited.
    */
   maxRequestBodyWireBytes?: number
   /**
    * Reject request bodies larger than this many decoded bytes (after
    * decompression). This is the compression-bomb guard.
-   * Default: 16 MiB when not set.
+   * Default: unlimited.
    */
   maxRequestBodyDecodedBytes?: number
-  /** Maximum total QUIC connections the server will accept.  Default: unlimited. */
+  /** Maximum total QUIC connections the server will accept. Default: 1024. */
   maxTotalConnections?: number
   /** Drain timeout in milliseconds after shutdown signal.  Default: 30000. */
   drainTimeout?: number
