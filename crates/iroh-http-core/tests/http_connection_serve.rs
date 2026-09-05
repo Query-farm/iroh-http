@@ -334,6 +334,10 @@ async fn reusable_runtime_shares_admission_across_connections() {
     .await
     .expect("load-shed response");
     assert_eq!(shed.status(), hyper::StatusCode::SERVICE_UNAVAILABLE);
+    shed.into_body()
+        .collect()
+        .await
+        .expect("load-shed response body");
     assert_eq!(service_calls.load(Ordering::SeqCst), 1);
 
     release.notify_one();
