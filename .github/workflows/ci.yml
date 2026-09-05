@@ -170,7 +170,7 @@ jobs:
         # Criterion's single-iteration mode: validates bench code compiles and
         # doesn't panic at startup — catches runtime/API regressions early.
         # Runs in parallel with the e2e job so it doesn't add to the critical path.
-        run: cargo bench -p iroh-http-core -- --test
+        run: cargo bench -p query-farm-iroh-http-core -- --test
 
   # ── Integration: build native + run e2e (only after verify passes) ───────────
   e2e:
