@@ -307,9 +307,10 @@ async fn reusable_runtime_shares_admission_across_connections() {
 
     let address = server_addr(&server_endpoint);
     let first_address = address.clone();
+    let first_request_client = first_client.clone();
     let first = tokio::spawn(async move {
         fetch_request(
-            &first_client,
+            &first_request_client,
             &first_address,
             hyper::Request::builder()
                 .uri("/hold")
@@ -348,6 +349,12 @@ async fn reusable_runtime_shares_admission_across_connections() {
         .collect()
         .await
         .expect("first response body");
+    // This test owns two independent client endpoints and is about shared
+    // admission, not runtime-initiated graceful delivery (covered above).
+    // Close both clients so pooled QUIC connections cannot keep the cleanup
+    // assertion dependent on transport ACK timing under a loaded CI runner.
+    first_client.close().await;
+    second_client.close().await;
     assert!(runtime.shutdown().await);
     tokio::time::timeout(Duration::from_secs(5), server)
         .await
