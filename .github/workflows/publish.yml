@@ -47,6 +47,17 @@ jobs:
         id: auth
 
       - name: Publish package
-        run: cargo publish -p query-farm-iroh-http-core --locked
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "query-farm-iroh-http-core") | .version')
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: query-farm-iroh-http-core-release (hello@query.farm)' \
+            "https://crates.io/api/v1/crates/query-farm-iroh-http-core/$version")
+          if [ "$code" = 200 ]; then
+            echo "query-farm-iroh-http-core $version already exists on crates.io — skipping"
+          else
+            cargo publish -p query-farm-iroh-http-core --locked
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
